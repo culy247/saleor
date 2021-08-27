@@ -43,6 +43,7 @@ from ..app.types import App
 from ..channel import ChannelContext
 from ..channel.dataloaders import ChannelByIdLoader, ChannelByOrderLineIdLoader
 from ..core.connection import CountableDjangoObjectType
+from ..core.descriptions import ADDED_IN_31, DEPRECATED_IN_3X_FIELD
 from ..core.enums import LanguageCodeEnum
 from ..core.mutations import validation_error_to_error_type
 from ..core.scalars import PositiveDecimal
@@ -442,7 +443,8 @@ class OrderLine(CountableDjangoObjectType):
         description="List of allocations across warehouses.",
     )
     quantity_to_fulfill = graphene.Int(
-        required=True, description="A quantity of items remaining to be fulfilled."
+        required=True,
+        description=f"{ADDED_IN_31} A quantity of items remaining to be fulfilled.",
     )
     unit_discount_type = graphene.Field(
         DiscountValueTypeEnum,
@@ -675,8 +677,8 @@ class Order(CountableDjangoObjectType):
     )
     language_code = graphene.String(
         deprecation_reason=(
+            f"{DEPRECATED_IN_3X_FIELD} "
             "Use the `languageCodeEnum` field to fetch the language code. "
-            "This field will be removed in Saleor 4.0."
         ),
         required=True,
     )
@@ -686,22 +688,16 @@ class Order(CountableDjangoObjectType):
     discount = graphene.Field(
         Money,
         description="Returns applied discount.",
-        deprecation_reason=(
-            "Use discounts field. This field will be removed in Saleor 4.0."
-        ),
+        deprecation_reason=f"{DEPRECATED_IN_3X_FIELD} Use discounts field.",
     )
     discount_name = graphene.String(
         description="Discount name.",
-        deprecation_reason=(
-            "Use discounts field. This field will be removed in Saleor 4.0."
-        ),
+        deprecation_reason=f"{DEPRECATED_IN_3X_FIELD} Use discounts field.",
     )
 
     translated_discount_name = graphene.String(
         description="Translated discount name.",
-        deprecation_reason=(
-            "Use discounts field. This field will be removed in Saleor 4.0."
-        ),
+        deprecation_reason=f"{DEPRECATED_IN_3X_FIELD} Use discounts field. ",
     )
 
     discounts = graphene.List(
