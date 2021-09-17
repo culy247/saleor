@@ -553,6 +553,22 @@ def customer_user(address):  # pylint: disable=W0613
 
 
 @pytest.fixture
+def customer_user2(address):
+    default_address = address.get_copy()
+    user = User.objects.create_user(
+        "test2@example.com",
+        "password",
+        default_billing_address=default_address,
+        default_shipping_address=default_address,
+        first_name="Jane",
+        last_name="Doe",
+    )
+    user.addresses.add(default_address)
+    user._password = "password"
+    return user
+
+
+@pytest.fixture
 def user_checkout(customer_user, channel_USD):
     checkout = Checkout.objects.create(
         user=customer_user,
@@ -1133,8 +1149,8 @@ def numeric_attribute(db):
         filterable_in_dashboard=True,
         available_in_grid=True,
     )
-    AttributeValue.objects.create(attribute=attribute, name="10", slug="10")
-    AttributeValue.objects.create(attribute=attribute, name="15", slug="15")
+    AttributeValue.objects.create(attribute=attribute, name="9.5", slug="10_5")
+    AttributeValue.objects.create(attribute=attribute, name="15.2", slug="15_2")
     return attribute
 
 
@@ -1171,6 +1187,33 @@ def file_attribute_with_file_input_type_without_values(db):
         type=AttributeType.PRODUCT_TYPE,
         input_type=AttributeInputType.FILE,
     )
+
+
+@pytest.fixture
+def swatch_attribute(db):
+    attribute = Attribute.objects.create(
+        slug="T-shirt color",
+        name="t-shirt-color",
+        type=AttributeType.PRODUCT_TYPE,
+        input_type=AttributeInputType.SWATCH,
+        filterable_in_storefront=True,
+        filterable_in_dashboard=True,
+        available_in_grid=True,
+    )
+    AttributeValue.objects.create(
+        attribute=attribute, name="Red", slug="red", value="#ff0000"
+    )
+    AttributeValue.objects.create(
+        attribute=attribute, name="White", slug="whit", value="#fffff"
+    )
+    AttributeValue.objects.create(
+        attribute=attribute,
+        name="Logo",
+        slug="logo",
+        file_url="http://mirumee.com/test_media/test_file.jpeg",
+        content_type="image/jpeg",
+    )
+    return attribute
 
 
 @pytest.fixture
@@ -4110,6 +4153,15 @@ def payment_dummy(db, order_with_lines):
         billing_country_area=order_with_lines.billing_address.country_area,
         billing_email=order_with_lines.user_email,
     )
+
+
+@pytest.fixture
+def payment(payment_dummy, payment_app):
+    gateway_id = "credit-card"
+    gateway = to_payment_app_id(payment_app, gateway_id)
+    payment_dummy.gateway = gateway
+    payment_dummy.save()
+    return payment_dummy
 
 
 @pytest.fixture
