@@ -11,6 +11,7 @@ All notable, unreleased changes to this project will be documented in this file.
 - Introduce gift card feature - #7827 by @IKarbowiak, @tomaszszymanski129
 - Deprecate `setup_future_usage` from `checkoutComplete.paymentData` input - will be removed in Saleor 4.0 - #7994 by @mateuszgrzyb
 - Possibility to pass metadata in input of `checkoutPaymentCreate` - #8076 by @mateuszgrzyb
+- Fix shipping address issue in `availableCollectionPoints` resolver for checkout - #8143 by @kuchichan
 
 
 # 3.0.0 [Unreleased]
@@ -152,6 +153,7 @@ All notable, unreleased changes to this project will be documented in this file.
 - Allow impersonating user by an app/staff - #7754 by @korycins:
   - Add `customerId` to `checkoutCustomerAttach` mutation
   - Add new permision `IMPERSONATE_USER`
+
 
 ### Breaking
 - Multichannel MVP: Multicurrency - #6242 by @fowczarek @d-wysocki

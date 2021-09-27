@@ -90,7 +90,7 @@ def clean_delivery_method(
             ERROR_DOES_NOT_SHIP, code=CheckoutErrorCode.SHIPPING_NOT_REQUIRED.value
         )
 
-    if not checkout_info.shipping_address:
+    if not checkout_info.shipping_address and isinstance(method, models.ShippingMethod):
         raise ValidationError(
             "Cannot choose a shipping method for a checkout without the "
             "shipping address.",
@@ -181,7 +181,7 @@ def check_lines_quantity(
         errors = [
             ValidationError(
                 f"Could not add items {item.variant}. "
-                f"Only {item.available_quantity} remaining in stock.",
+                f"Only {max(item.available_quantity, 0)} remaining in stock.",
                 code=e.code,
             )
             for item in e.items
@@ -512,7 +512,7 @@ class CheckoutLinesAdd(BaseMutation):
         )
         checkout_info.valid_pick_up_points = (
             get_valid_collection_points_for_checkout_info(
-                checkout_info, checkout_info.shipping_address, lines
+                checkout_info.shipping_address, lines, checkout_info
             )
         )
         return lines
@@ -562,7 +562,7 @@ class CheckoutLinesAdd(BaseMutation):
         )
         checkout_info.valid_pick_up_points = (
             get_valid_collection_points_for_checkout_info(
-                checkout_info, checkout_info.shipping_address, lines
+                checkout_info.shipping_address, lines, checkout_info
             )
         )
 
