@@ -1,6 +1,6 @@
 from collections import defaultdict
 from datetime import date
-from typing import TYPE_CHECKING, Dict, Iterable, Optional
+from typing import TYPE_CHECKING, Iterable, Optional
 
 from dateutil.relativedelta import relativedelta
 from django.core.exceptions import ValidationError
@@ -13,10 +13,8 @@ from ..core.utils.promo_code import InvalidPromoCode, generate_promo_code
 from ..core.utils.validators import user_is_valid
 from ..order.actions import create_fulfillments
 from ..order.models import OrderLine
-from ..product import ProductTypeKind
-from ..product.models import Product, ProductType, ProductVariant
 from ..site import GiftCardSettingsExpiryType
-from . import GiftCardEvents, events
+from . import GiftCardEvents, GiftCardLineData, events
 from .models import GiftCard, GiftCardEvent
 from .notifications import send_gift_card_notification
 
@@ -86,37 +84,24 @@ def fulfill_non_shippable_gift_cards(
 ):
     if not user_is_valid(requestor_user):
         requestor_user = None
-    line_pks = [line.pk for line in order_lines]
-    gift_card_lines = get_non_shippable_gift_card_lines(line_pks)
+    gift_card_lines = get_non_shippable_gift_card_lines(order_lines)
     if not gift_card_lines:
         return
-    fulfill_gift_card_lines(gift_card_lines, requestor_user, app, order, manager)
-    quantities = {line.pk: line.quantity for line in gift_card_lines}
-    return gift_cards_create(
-        order, gift_card_lines, quantities, settings, requestor_user, app, manager
+    fulfill_gift_card_lines(
+        gift_card_lines, requestor_user, app, order, settings, manager
     )
 
 
-def get_non_shippable_gift_card_lines(line_ids: Iterable[int]):
-    gift_card_lines = get_gift_card_lines(line_ids)
-    gift_card_lines = gift_card_lines.filter(
-        is_shipping_required=False,
+def get_non_shippable_gift_card_lines(lines: Iterable[OrderLine]) -> "QuerySet":
+    gift_card_lines = get_gift_card_lines(lines)
+    non_shippable_lines = OrderLine.objects.filter(
+        id__in=[line.pk for line in gift_card_lines], is_shipping_required=False
     )
-    return gift_card_lines
+    return non_shippable_lines
 
 
-def get_gift_card_lines(line_pks: Iterable[int]):
-    product_types = ProductType.objects.filter(kind=ProductTypeKind.GIFT_CARD)
-    products = Product.objects.filter(
-        Exists(product_types.filter(pk=OuterRef("product_type_id")))
-    )
-    variants = ProductVariant.objects.filter(
-        Exists(products.filter(pk=OuterRef("product_id")))
-    )
-    gift_card_lines = OrderLine.objects.filter(id__in=line_pks).filter(
-        Exists(variants.filter(pk=OuterRef("variant_id")))
-    )
-
+def get_gift_card_lines(lines: Iterable[OrderLine]):
+    gift_card_lines = [line for line in lines if line.is_gift_card]
     return gift_card_lines
 
 
@@ -125,6 +110,7 @@ def fulfill_gift_card_lines(
     requestor_user: Optional["User"],
     app: Optional["App"],
     order: "Order",
+    settings: "SiteSettings",
     manager: "PluginsManager",
 ):
     lines_for_warehouses = defaultdict(list)
@@ -158,14 +144,14 @@ def fulfill_gift_card_lines(
         order,
         dict(lines_for_warehouses),
         manager,
+        settings,
         notify_customer=True,
     )
 
 
 def gift_cards_create(
     order: "Order",
-    gift_card_lines: Iterable["OrderLine"],
-    quantities: Dict[int, int],
+    gift_card_lines_info: Iterable["GiftCardLineData"],
     settings: "SiteSettings",
     requestor_user: Optional["User"],
     app: Optional["App"],
@@ -177,7 +163,8 @@ def gift_cards_create(
     gift_cards = []
     non_shippable_gift_cards = []
     expiry_date = calculate_expiry_date(settings)
-    for order_line in gift_card_lines:
+    for line_data in gift_card_lines_info:
+        order_line = line_data.order_line
         price = order_line.unit_price_gross
         line_gift_cards = [
             GiftCard(  # type: ignore
@@ -186,10 +173,11 @@ def gift_cards_create(
                 current_balance=price,
                 created_by=customer_user,
                 created_by_email=user_email,
-                product=order_line.variant.product if order_line.variant else None,
+                product=line_data.variant.product if line_data.variant else None,
+                fulfillment_line=line_data.fulfillment_line,
                 expiry_date=expiry_date,
             )
-            for _ in range(quantities[order_line.pk])
+            for _ in range(line_data.quantity)
         ]
         gift_cards.extend(line_gift_cards)
         if not order_line.is_shipping_required:

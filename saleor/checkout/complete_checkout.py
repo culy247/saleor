@@ -36,8 +36,9 @@ from ..payment import PaymentError, gateway
 from ..payment.models import Payment, Transaction
 from ..payment.utils import fetch_customer_id, store_customer_id
 from ..product.models import ProductTranslation, ProductVariantTranslation
-from ..warehouse.availability import check_stock_quantity_bulk
-from ..warehouse.management import allocate_stocks
+from ..warehouse.availability import check_stock_and_preorder_quantity_bulk
+from ..warehouse.management import allocate_preorders, allocate_stocks
+from ..warehouse.reservations import is_reservation_enabled
 from . import AddressType
 from .checkout_cleaner import clean_checkout_payment, clean_checkout_shipping
 from .models import Checkout
@@ -66,7 +67,8 @@ def _get_voucher_data_for_order(checkout_info: "CheckoutInfo") -> dict:
     if not voucher:
         return {}
 
-    increase_voucher_usage(voucher)
+    if voucher.usage_limit:
+        increase_voucher_usage(voucher)
     if voucher.apply_once_per_customer:
         add_voucher_usage_by_customer(voucher, checkout_info.get_customer_email())
     return {
@@ -84,10 +86,6 @@ def _process_shipping_data_for_order(
     delivery_method_info = checkout_info.delivery_method_info
     shipping_address = delivery_method_info.shipping_address
 
-    delivery_method_dict = {
-        delivery_method_info.order_key: delivery_method_info.delivery_method
-    }
-
     if checkout_info.user and shipping_address:
         store_user_address(
             checkout_info.user, shipping_address, AddressType.SHIPPING, manager=manager
@@ -100,7 +98,7 @@ def _process_shipping_data_for_order(
         "shipping_price": shipping_price,
         "weight": checkout_info.checkout.get_total_weight(lines),
     }
-    result.update(delivery_method_dict)
+    result.update(delivery_method_info.delivery_method_order_field)
     result.update(delivery_method_info.delivery_method_name)
 
     return result
@@ -196,6 +194,7 @@ def _create_line_for_order(
         translated_product_name=translated_product_name,
         translated_variant_name=translated_variant_name,
         product_sku=variant.sku,
+        product_variant_id=variant.get_global_id(),
         is_shipping_required=variant.is_shipping_required(),
         is_gift_card=variant.is_gift_card(),
         quantity=quantity,
@@ -254,7 +253,7 @@ def _create_lines_for_order(
     additional_warehouse_lookup = (
         checkout_info.delivery_method_info.get_warehouse_filter_lookup()
     )
-    check_stock_quantity_bulk(
+    check_stock_and_preorder_quantity_bulk(
         variants,
         country_code,
         quantities,
@@ -351,6 +350,7 @@ def _prepare_order_data(
 def _create_order(
     *,
     checkout_info: "CheckoutInfo",
+    checkout_lines: Iterable["CheckoutLineInfo"],
     order_data: dict,
     user: User,
     app: Optional["App"],
@@ -425,7 +425,10 @@ def _create_order(
         checkout_info.channel.slug,
         manager,
         additional_warehouse_lookup,
+        check_reservations=is_reservation_enabled(site_settings),
+        checkout_lines=[line.line for line in checkout_lines],
     )
+    allocate_preorders(order_lines_info, checkout_info.channel.slug)
 
     add_gift_cards_to_order(checkout_info, order, total_price_left, user, app)
 
@@ -509,7 +512,7 @@ def _prepare_checkout(
 
 def release_voucher_usage(order_data: dict):
     voucher = order_data.get("voucher")
-    if voucher:
+    if voucher and voucher.usage_limit:
         decrease_voucher_usage(voucher)
         if "user_email" in order_data:
             remove_voucher_usage_by_customer(voucher, order_data["user_email"])
@@ -645,6 +648,7 @@ def complete_checkout(
         try:
             order = _create_order(
                 checkout_info=checkout_info,
+                checkout_lines=lines,
                 order_data=order_data,
                 user=user,  # type: ignore
                 app=app,

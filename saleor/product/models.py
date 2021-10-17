@@ -2,6 +2,7 @@ import datetime
 from typing import TYPE_CHECKING, Iterable, Optional, Union
 from uuid import uuid4
 
+import graphene
 from django.conf import settings
 from django.contrib.postgres.aggregates import StringAgg
 from django.contrib.postgres.indexes import GinIndex
@@ -27,6 +28,7 @@ from django.db.models import (
 )
 from django.db.models.functions import Coalesce
 from django.urls import reverse
+from django.utils import timezone
 from django.utils.encoding import smart_text
 from django_measurement.models import MeasurementField
 from django_prices.models import MoneyField
@@ -77,6 +79,7 @@ class Category(ModelWithMetadata, MPTTModel, SeoModel):
     name = models.CharField(max_length=250)
     slug = models.SlugField(max_length=255, unique=True, allow_unicode=True)
     description = SanitizedJSONField(blank=True, null=True, sanitizer=clean_editor_js)
+    description_plaintext = TextField(blank=True)
     parent = models.ForeignKey(
         "self", null=True, blank=True, related_name="children", on_delete=models.CASCADE
     )
@@ -88,6 +91,17 @@ class Category(ModelWithMetadata, MPTTModel, SeoModel):
     objects = models.Manager()
     tree = TreeManager()
     translated = TranslationProxy()
+
+    class Meta:
+        indexes = [
+            *ModelWithMetadata.Meta.indexes,
+            GinIndex(
+                name="category_search_name_slug_gin",
+                # `opclasses` and `fields` should be the same length
+                fields=["name", "slug", "description_plaintext"],
+                opclasses=["gin_trgm_ops"] * 3,
+            ),
+        ]
 
     def __str__(self) -> str:
         return self.name
@@ -151,6 +165,15 @@ class ProductType(ModelWithMetadata):
                 "Manage product types and attributes.",
             ),
         )
+        indexes = [
+            *ModelWithMetadata.Meta.indexes,
+            GinIndex(
+                name="product_type_search_gin",
+                # `opclasses` and `fields` should be the same length
+                fields=["name", "slug"],
+                opclasses=["gin_trgm_ops"] * 2,
+            ),
+        ]
 
     def __str__(self) -> str:
         return self.name
@@ -538,13 +561,16 @@ class ProductChannelListing(PublishableModel):
 
 
 class ProductVariant(SortableModel, ModelWithMetadata):
-    sku = models.CharField(max_length=255, unique=True)
+    sku = models.CharField(max_length=255, unique=True, null=True, blank=True)
     name = models.CharField(max_length=255, blank=True)
     product = models.ForeignKey(
         Product, related_name="variants", on_delete=models.CASCADE
     )
     media = models.ManyToManyField("ProductMedia", through="VariantMedia")
     track_inventory = models.BooleanField(default=True)
+    is_preorder = models.BooleanField(default=False)
+    preorder_end_date = models.DateTimeField(null=True, blank=True)
+    preorder_global_threshold = models.IntegerField(blank=True, null=True)
 
     weight = MeasurementField(
         measurement=Weight,
@@ -561,7 +587,10 @@ class ProductVariant(SortableModel, ModelWithMetadata):
         app_label = "product"
 
     def __str__(self) -> str:
-        return self.name or self.sku
+        return self.name or self.sku or f"ID:{self.pk}"
+
+    def get_global_id(self):
+        return graphene.Node.to_global_id("ProductVariant", self.id)
 
     def get_price(
         self,
@@ -571,12 +600,14 @@ class ProductVariant(SortableModel, ModelWithMetadata):
         channel_listing: "ProductVariantChannelListing",
         discounts: Optional[Iterable[DiscountInfo]] = None,
     ) -> "Money":
+
         return calculate_discounted_price(
             product=product,
             price=channel_listing.price,
             discounts=discounts,
             collections=collections,
             channel=channel,
+            variant_id=self.id,
         )
 
     def get_weight(self):
@@ -607,6 +638,11 @@ class ProductVariant(SortableModel, ModelWithMetadata):
     def get_ordering_queryset(self):
         return self.product.variants.all()
 
+    def is_preorder_active(self):
+        return self.is_preorder and (
+            self.preorder_end_date is None or timezone.now() <= self.preorder_end_date
+        )
+
 
 class ProductVariantTranslation(Translation):
     product_variant = models.ForeignKey(
@@ -636,6 +672,15 @@ class ProductVariantTranslation(Translation):
 
     def get_translated_keys(self):
         return {"name": self.name}
+
+
+class ProductVariantChannelListingQuerySet(models.QuerySet):
+    def annotate_preorder_quantity_allocated(self):
+        return self.annotate(
+            preorder_quantity_allocated=Coalesce(
+                Sum("preorder_allocations__quantity"), 0
+            ),
+        )
 
 
 class ProductVariantChannelListing(models.Model):
@@ -669,6 +714,10 @@ class ProductVariantChannelListing(models.Model):
         null=True,
     )
     cost_price = MoneyField(amount_field="cost_price_amount", currency_field="currency")
+
+    preorder_quantity_threshold = models.IntegerField(blank=True, null=True)
+
+    objects = models.Manager.from_queryset(ProductVariantChannelListingQuerySet)()
 
     class Meta:
         unique_together = [["variant", "channel"]]
@@ -810,6 +859,15 @@ class Collection(SeoModel, ModelWithMetadata):
 
     class Meta(ModelWithMetadata.Meta):
         ordering = ("slug",)
+        indexes = [
+            *ModelWithMetadata.Meta.indexes,
+            GinIndex(
+                name="collection_search_gin",
+                # `opclasses` and `fields` should be the same length
+                fields=["name", "slug"],
+                opclasses=["gin_trgm_ops"] * 2,
+            ),
+        ]
 
     def __str__(self) -> str:
         return self.name

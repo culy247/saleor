@@ -7,11 +7,7 @@ from django.template.defaultfilters import pluralize
 from ....core.exceptions import InsufficientStock
 from ....core.permissions import OrderPermissions
 from ....core.tracing import traced_atomic_transaction
-from ....giftcard.utils import (
-    get_gift_card_lines,
-    gift_cards_create,
-    order_has_gift_card_lines,
-)
+from ....giftcard.utils import order_has_gift_card_lines
 from ....order import FulfillmentLineData, FulfillmentStatus, OrderLineData
 from ....order import models as order_models
 from ....order.actions import (
@@ -30,7 +26,6 @@ from ...core.mutations import BaseMutation
 from ...core.scalars import PositiveDecimal
 from ...core.types.common import OrderError
 from ...core.utils import get_duplicated_values
-from ...utils import resolve_global_ids_to_primary_keys
 from ...warehouse.types import Warehouse
 from ..types import Fulfillment, FulfillmentLine, Order, OrderLine
 from ..utils import prepare_insufficient_stock_order_validation_errors
@@ -103,9 +98,9 @@ class OrderFulfill(BaseMutation):
         error_type_field = "order_errors"
 
     @classmethod
-    def clean_lines(cls, order_lines, quantities):
-        for order_line in order_lines:
-            line_total_quantity = quantities[order_line.pk]
+    def clean_lines(cls, order_lines, quantities_for_lines):
+        for order_line, line_quantities in zip(order_lines, quantities_for_lines):
+            line_total_quantity = sum(line_quantities)
             line_quantity_unfulfilled = order_line.quantity_unfulfilled
 
             if line_total_quantity > line_quantity_unfulfilled:
@@ -160,6 +155,23 @@ class OrderFulfill(BaseMutation):
             )
 
     @classmethod
+    def check_lines_for_preorder(cls, order_lines):
+        for order_line in order_lines:
+            if order_line.variant_id and order_line.variant.is_preorder_active():
+                order_line_global_id = graphene.Node.to_global_id(
+                    "OrderLine", order_line.pk
+                )
+                raise ValidationError(
+                    {
+                        "order_line_id": ValidationError(
+                            "Can not fulfill preorder variant.",
+                            code=OrderErrorCode.FULFILL_ORDER_LINE,
+                            params={"order_lines": [order_line_global_id]},
+                        )
+                    }
+                )
+
+    @classmethod
     def check_total_quantity_of_items(cls, quantities_for_lines):
         flat_quantities = sum(quantities_for_lines, [])
         if sum(flat_quantities) <= 0:
@@ -204,12 +216,11 @@ class OrderFulfill(BaseMutation):
         order_lines = cls.get_nodes_or_error(
             lines_ids, field="lines", only_type=OrderLine
         )
-        order_line_id_to_total_quantity = {
-            order_line.pk: sum(line_quantities)
-            for order_line, line_quantities in zip(order_lines, quantities_for_lines)
-        }
 
-        cls.clean_lines(order_lines, order_line_id_to_total_quantity)
+        cls.clean_lines(order_lines, quantities_for_lines)
+
+        if site_settings.fulfillment_auto_approve:
+            cls.check_lines_for_preorder(order_lines)
 
         cls.check_total_quantity_of_items(quantities_for_lines)
 
@@ -225,22 +236,19 @@ class OrderFulfill(BaseMutation):
                     )
 
         data["order_lines"] = order_lines
-        data["gift_card_lines"] = cls.get_gift_card_lines(lines_ids)
-        data["quantities"] = order_line_id_to_total_quantity
         data["lines_for_warehouses"] = lines_for_warehouses
         return data
-
-    @staticmethod
-    def get_gift_card_lines(lines_ids):
-        _, pks = resolve_global_ids_to_primary_keys(
-            lines_ids, OrderLine, raise_error=True
-        )
-        return get_gift_card_lines(pks)
 
     @classmethod
     @traced_atomic_transaction()
     def perform_mutation(cls, _root, info, order, **data):
-        order = cls.get_node_or_error(info, order, field="order", only_type=Order)
+        order = cls.get_node_or_error(
+            info,
+            order,
+            field="order",
+            only_type=Order,
+            qs=order_models.Order.objects.prefetch_related("lines__variant"),
+        )
         data = data.get("input")
 
         cleaned_input = cls.clean_input(info, order, data)
@@ -254,18 +262,8 @@ class OrderFulfill(BaseMutation):
         allow_stock_to_be_exceeded = cleaned_input.get(
             "allow_stock_to_be_exceeded", False
         )
-        gift_card_lines = cleaned_input["gift_card_lines"]
-        quantities = cleaned_input["quantities"]
 
-        gift_cards_create(
-            order,
-            gift_card_lines,
-            quantities,
-            context.site.settings,
-            user,
-            app,
-            manager,
-        )
+        approved = info.context.site.settings.fulfillment_auto_approve
 
         try:
             fulfillments = create_fulfillments(
@@ -274,9 +272,10 @@ class OrderFulfill(BaseMutation):
                 order,
                 dict(lines_for_warehouses),
                 manager,
+                context.site.settings,
                 notify_customer,
                 allow_stock_to_be_exceeded=allow_stock_to_be_exceeded,
-                approved=info.context.site.settings.fulfillment_auto_approve,
+                approved=approved,
             )
         except InsufficientStock as exc:
             errors = prepare_insufficient_stock_order_validation_errors(exc)
@@ -450,6 +449,9 @@ class FulfillmentApprove(BaseMutation):
                 "fulfillments can be accepted.",
                 code=OrderErrorCode.INVALID.value,
             )
+
+        OrderFulfill.check_lines_for_preorder([line.order_line for line in fulfillment])
+
         if (
             not info.context.site.settings.fulfillment_allow_unpaid
             and not fulfillment.order.is_fully_paid()
@@ -470,8 +472,9 @@ class FulfillmentApprove(BaseMutation):
             info.context.user,
             info.context.app,
             info.context.plugins,
-            allow_stock_to_be_exceeded=data.get("allow_stock_to_be_exceeded"),
+            info.context.site.settings,
             notify_customer=data["notify_customer"],
+            allow_stock_to_be_exceeded=data.get("allow_stock_to_be_exceeded"),
         )
         order.refresh_from_db(fields=["status"])
         return FulfillmentApprove(fulfillment=fulfillment, order=order)

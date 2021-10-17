@@ -10,6 +10,7 @@ import pytest
 import pytz
 from django.core.exceptions import ValidationError
 from django.db.models import Sum
+from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.utils.html import strip_tags
 from django.utils.text import slugify
@@ -507,6 +508,84 @@ def test_product_query_by_id_as_app_without_channel_slug(
     product_data = content["data"]["product"]
     assert product_data is not None
     assert product_data["name"] == product.name
+
+
+def test_product_variants_without_sku_query_by_staff(
+    staff_api_client, product, channel_USD
+):
+    product.variants.update(sku=None)
+    product_id = graphene.Node.to_global_id("Product", product.pk)
+
+    variables = {
+        "id": product_id,
+        "channel": channel_USD.slug,
+    }
+
+    response = staff_api_client.post_graphql(
+        QUERY_PRODUCT_BY_ID,
+        variables=variables,
+    )
+    content = get_graphql_content(response)
+    product_data = content["data"]["product"]
+
+    assert product_data is not None
+    assert product_data["id"] == product_id
+
+    variant = product.variants.first()
+    variant_id = graphene.Node.to_global_id("ProductVariant", variant.pk)
+    assert product_data["variants"] == [{"id": variant_id}]
+
+
+def test_product_only_with_variants_without_sku_query_by_customer(
+    user_api_client, product, channel_USD
+):
+    product.variants.update(sku=None)
+    product_id = graphene.Node.to_global_id("Product", product.pk)
+
+    variables = {
+        "id": product_id,
+        "channel": channel_USD.slug,
+    }
+
+    response = user_api_client.post_graphql(
+        QUERY_PRODUCT_BY_ID,
+        variables=variables,
+    )
+    content = get_graphql_content(response)
+    product_data = content["data"]["product"]
+
+    assert product_data is not None
+    assert product_data["id"] == product_id
+
+    variant = product.variants.first()
+    variant_id = graphene.Node.to_global_id("ProductVariant", variant.pk)
+    assert product_data["variants"] == [{"id": variant_id}]
+
+
+def test_product_only_with_variants_without_sku_query_by_anonymous(
+    api_client, product, channel_USD
+):
+    product.variants.update(sku=None)
+    product_id = graphene.Node.to_global_id("Product", product.pk)
+
+    variables = {
+        "id": product_id,
+        "channel": channel_USD.slug,
+    }
+
+    response = api_client.post_graphql(
+        QUERY_PRODUCT_BY_ID,
+        variables=variables,
+    )
+    content = get_graphql_content(response)
+    product_data = content["data"]["product"]
+
+    assert product_data is not None
+    assert product_data["id"] == product_id
+
+    variant = product.variants.first()
+    variant_id = graphene.Node.to_global_id("ProductVariant", variant.pk)
+    assert product_data["variants"] == [{"id": variant_id}]
 
 
 QUERY_COLLECTION_FROM_PRODUCT = """
@@ -2660,6 +2739,88 @@ def test_query_products_with_filter_ids(
     assert [node["node"]["id"] for node in products_data] == product_ids
 
 
+def test_products_query_with_filter_has_preordered_variants_false(
+    query_products_with_filter,
+    staff_api_client,
+    preorder_variant_global_threshold,
+    product_without_shipping,
+    permission_manage_products,
+):
+    product = product_without_shipping
+    variables = {"filter": {"hasPreorderedVariants": False}}
+    staff_api_client.user.user_permissions.add(permission_manage_products)
+    response = staff_api_client.post_graphql(query_products_with_filter, variables)
+    content = get_graphql_content(response)
+    product_id = graphene.Node.to_global_id("Product", product.id)
+    products = content["data"]["products"]["edges"]
+
+    assert len(products) == 1
+    assert products[0]["node"]["id"] == product_id
+    assert products[0]["node"]["name"] == product.name
+
+
+def test_products_query_with_filter_has_preordered_variants_true(
+    query_products_with_filter,
+    staff_api_client,
+    preorder_variant_global_threshold,
+    product_without_shipping,
+    permission_manage_products,
+):
+    product = preorder_variant_global_threshold.product
+    variables = {"filter": {"hasPreorderedVariants": True}}
+    staff_api_client.user.user_permissions.add(permission_manage_products)
+    response = staff_api_client.post_graphql(query_products_with_filter, variables)
+    content = get_graphql_content(response)
+    product_id = graphene.Node.to_global_id("Product", product.id)
+    products = content["data"]["products"]["edges"]
+
+    assert len(products) == 1
+    assert products[0]["node"]["id"] == product_id
+    assert products[0]["node"]["name"] == product.name
+
+
+def test_products_query_with_filter_has_preordered_variants_before_end_date(
+    query_products_with_filter,
+    staff_api_client,
+    preorder_variant_global_threshold,
+    permission_manage_products,
+):
+    variant = preorder_variant_global_threshold
+    variant.preorder_end_date = timezone.now() + timedelta(days=3)
+    variant.save(update_fields=["preorder_end_date"])
+
+    product = preorder_variant_global_threshold.product
+    variables = {"filter": {"hasPreorderedVariants": True}}
+    staff_api_client.user.user_permissions.add(permission_manage_products)
+    response = staff_api_client.post_graphql(query_products_with_filter, variables)
+    content = get_graphql_content(response)
+    product_id = graphene.Node.to_global_id("Product", product.id)
+    products = content["data"]["products"]["edges"]
+
+    assert len(products) == 1
+    assert products[0]["node"]["id"] == product_id
+    assert products[0]["node"]["name"] == product.name
+
+
+def test_products_query_with_filter_has_preordered_variants_after_end_date(
+    query_products_with_filter,
+    staff_api_client,
+    preorder_variant_global_threshold,
+    permission_manage_products,
+):
+    variant = preorder_variant_global_threshold
+    variant.preorder_end_date = timezone.now() - timedelta(days=3)
+    variant.save(update_fields=["preorder_end_date"])
+
+    variables = {"filter": {"hasPreorderedVariants": True}}
+    staff_api_client.user.user_permissions.add(permission_manage_products)
+    response = staff_api_client.post_graphql(query_products_with_filter, variables)
+    content = get_graphql_content(response)
+    products = content["data"]["products"]["edges"]
+
+    assert len(products) == 0
+
+
 QUERY_PRODUCT_MEDIA_BY_ID = """
     query productMediaById($mediaId: ID!, $productId: ID!, $channel: String) {
         product(id: $productId, channel: $channel) {
@@ -3749,14 +3910,24 @@ def test_create_product_with_boolean_attribute(
 
 SEARCH_PRODUCTS_QUERY = """
     query Products(
-        $filters: ProductFilterInput, $sortBy: ProductOrder, $channel: String
+        $filters: ProductFilterInput,
+        $sortBy: ProductOrder,
+        $channel: String,
+        $after: String,
     ) {
-        products(first: 5, filter: $filters, sortBy: $sortBy, channel: $channel) {
+        products(
+            first: 5,
+            filter: $filters,
+            sortBy: $sortBy,
+            channel: $channel,
+            after: $after,
+        ) {
             edges {
                 node {
                     id
                     name
                 }
+                cursor
             }
         }
     }
@@ -3898,6 +4069,44 @@ def test_search_product_by_description_and_name_without_sort_by(
     assert data[0]["node"]["name"] == product_2.name
     assert data[1]["node"]["name"] == product.name
     assert data[2]["node"]["name"] == product_1.name
+
+
+def test_search_product_by_description_and_name_and_use_cursor(
+    user_api_client, product_list, product, channel_USD, category, product_type
+):
+    product.description_plaintext = "red big red product"
+    product.save()
+
+    product_2 = product_list[1]
+    product_2.name = "red product"
+    product_2.save()
+    product_1 = product_list[0]
+    product_1.description_plaintext = "some red product"
+    product_1.save()
+
+    variables = {
+        "filters": {
+            "search": "red",
+        },
+        "channel": channel_USD.slug,
+    }
+    response = user_api_client.post_graphql(SEARCH_PRODUCTS_QUERY, variables)
+    content = get_graphql_content(response)
+    cursor = content["data"]["products"]["edges"][0]["cursor"]
+
+    variables = {
+        "filters": {
+            "search": "red",
+        },
+        "after": cursor,
+        "channel": channel_USD.slug,
+    }
+    response = user_api_client.post_graphql(SEARCH_PRODUCTS_QUERY, variables)
+    content = get_graphql_content(response)
+    data = content["data"]["products"]["edges"]
+
+    assert data[0]["node"]["name"] == product.name
+    assert data[1]["node"]["name"] == product_1.name
 
 
 @freeze_time("2020-03-18 12:00:00")
@@ -7126,6 +7335,7 @@ def test_delete_product_variant_in_draft_order(
             product_name=str(variant.product),
             variant_name=str(variant),
             product_sku=variant.sku,
+            product_variant_id=variant.get_global_id(),
             is_shipping_required=variant.is_shipping_required(),
             is_gift_card=variant.is_gift_card(),
             unit_price=TaxedMoney(net=net, gross=gross),
@@ -7140,6 +7350,7 @@ def test_delete_product_variant_in_draft_order(
             product_name=str(variant.product),
             variant_name=str(variant),
             product_sku=variant.sku,
+            product_variant_id=variant.get_global_id(),
             is_shipping_required=variant.is_shipping_required(),
             is_gift_card=variant.is_gift_card(),
             unit_price=TaxedMoney(net=net, gross=gross),
@@ -8378,6 +8589,7 @@ def test_product_type_delete_mutation_variants_in_draft_order(
         product_name=str(variant.product),
         variant_name=str(variant),
         product_sku=variant.sku,
+        product_variant_id=variant.get_global_id(),
         is_shipping_required=variant.is_shipping_required(),
         is_gift_card=variant.is_gift_card(),
         unit_price=TaxedMoney(net=net, gross=gross),
@@ -8391,6 +8603,7 @@ def test_product_type_delete_mutation_variants_in_draft_order(
         product_name=str(variant.product),
         variant_name=str(variant),
         product_sku=variant.sku,
+        product_variant_id=variant.get_global_id(),
         is_shipping_required=variant.is_shipping_required(),
         is_gift_card=variant.is_gift_card(),
         unit_price=TaxedMoney(net=net, gross=gross),
@@ -9993,9 +10206,10 @@ def test_collections_query_with_sort(
 @pytest.mark.parametrize(
     "category_filter, count",
     [
-        ({"search": "slug_"}, 3),
+        ({"search": "slug_"}, 4),
         ({"search": "Category1"}, 1),
-        ({"search": "cat1"}, 2),
+        ({"search": "cat1"}, 3),
+        ({"search": "Description cat1."}, 2),
         ({"search": "Subcategory_description"}, 1),
         ({"ids": [to_global_id("Category", 2), to_global_id("Category", 3)]}, 2),
     ],
@@ -10012,12 +10226,14 @@ def test_categories_query_with_filter(
         name="Category1",
         slug="slug_category1",
         description=dummy_editorjs("Description cat1."),
+        description_plaintext="Description cat1.",
     )
     Category.objects.create(
         id=2,
         name="Category2",
         slug="slug_category2",
         description=dummy_editorjs("Description cat2."),
+        description_plaintext="Description cat2.",
     )
 
     Category.objects.create(
@@ -10026,6 +10242,14 @@ def test_categories_query_with_filter(
         slug="slug_subcategory",
         parent=Category.objects.get(name="Category1"),
         description=dummy_editorjs("Subcategory_description of cat1."),
+        description_plaintext="Subcategory_description of cat1.",
+    )
+    Category.objects.create(
+        id=4,
+        name="DoubleSubCategory",
+        slug="slug_subcategory4",
+        description=dummy_editorjs("Super important Description cat1."),
+        description_plaintext="Super important Description cat1.",
     )
     variables = {"filter": category_filter}
     staff_api_client.user.user_permissions.add(permission_manage_products)
@@ -10615,6 +10839,31 @@ def test_update_or_create_variant_stocks(variant, warehouses):
     assert {stock.quantity for stock in variant.stocks.all()} == {
         data["quantity"] for data in stocks_data
     }
+
+
+@patch("saleor.plugins.manager.PluginsManager.product_variant_back_in_stock")
+def test_update_or_create_variant_stocks_when_stock_out_of_quantity(
+    back_in_stock_webhook_trigger, variant, warehouses
+):
+    stock = Stock.objects.create(
+        product_variant=variant,
+        warehouse=warehouses[0],
+        quantity=-5,
+    )
+    stocks_data = [{"quantity": 10, "warehouse": "321"}]
+
+    ProductVariantStocksUpdate.update_or_create_variant_stocks(
+        variant, stocks_data, warehouses, get_plugins_manager()
+    )
+
+    variant.refresh_from_db()
+    flush_post_commit_hooks()
+    assert variant.stocks.count() == 1
+    assert {stock.quantity for stock in variant.stocks.all()} == {
+        data["quantity"] for data in stocks_data
+    }
+    back_in_stock_webhook_trigger.assert_called_once_with(stock)
+    assert variant.stocks.all()[0].quantity == 10
 
 
 def test_update_or_create_variant_stocks_empty_stocks_data(variant, warehouses):

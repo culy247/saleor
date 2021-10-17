@@ -82,6 +82,9 @@ def get_product_variant_payload(variant: ProductVariant):
     return {
         "id": variant.id,
         "weight": str(variant.weight or ""),
+        "is_preorder": variant.is_preorder_active(),
+        "preorder_global_threshold": variant.preorder_global_threshold,
+        "preorder_end_date": variant.preorder_end_date,
         **get_default_images_payload(images),
     }
 
@@ -106,6 +109,7 @@ def get_order_line_payload(line: "OrderLine"):
         "variant": variant_dependent_fields.get("variant"),  # type: ignore
         "translated_variant_name": line.translated_variant_name or line.variant_name,
         "product_sku": line.product_sku,
+        "product_variant_id": line.product_variant_id,
         "quantity": line.quantity,
         "quantity_fulfilled": line.quantity_fulfilled,
         "currency": line.currency,
@@ -227,6 +231,7 @@ def get_default_order_payload(order: "Order", redirect_url: str = ""):
     order_payload = model_to_dict(order, fields=ORDER_MODEL_FIELDS)
     order_payload.update(
         {
+            "number": order.id,
             "channel_slug": order.channel.slug,
             "created": str(order.created),
             "shipping_price_net_amount": order.shipping_price_net_amount,
@@ -240,6 +245,7 @@ def get_default_order_payload(order: "Order", redirect_url: str = ""):
             "billing_address": get_address_payload(order.billing_address),
             "shipping_address": get_address_payload(order.shipping_address),
             "shipping_method_name": order.shipping_method_name,
+            "collection_point_name": order.collection_point_name,
             **get_discounts_payload(order),
         }
     )

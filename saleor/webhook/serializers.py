@@ -25,12 +25,14 @@ def serialize_checkout_lines(checkout: "Checkout") -> List[dict]:
         data.append(
             {
                 "sku": variant.sku,
+                "variant_id": variant.get_global_id(),
                 "quantity": line_info.line.quantity,
                 "base_price": str(base_price.amount),
                 "currency": channel.currency_code,
                 "full_name": variant.display_product(),
                 "product_name": product.name,
                 "variant_name": variant.name,
+                "attributes": serialize_product_or_variant_attributes(variant),
             }
         )
     return data
