@@ -23,6 +23,7 @@ All notable, unreleased changes to this project will be documented in this file.
 - Add query complexity limit to GraphQL API - #8526 by rafalp
 - Add `quantity_limit_per_customer` field to ProductVariant #8405 by @kuchichan
 - Optimize products stock availability filter - #8809 by @fowczarek
+- Do no allow using id for updating checkout and order metadata - #8906 by @IKarbowiak
 
 # 3.0.0 [Unreleased]
 
@@ -153,6 +154,7 @@ All notable, unreleased changes to this project will be documented in this file.
 - Deprecate nested objects in TranslatableContent types - #7522 by @IKarbowiak
 - Fix performance for User type on resolvers: orders, gift cards, events - #7574 by @tomaszszymanski129
 - Fix failing account mutations for app - #7569 by @IKarbowiak
+- Introduce `event_payload` to webhook tasks - #8227 by @jakubkuc
 - Modify order of auth middleware calls - #7572 by @tomaszszymanski129
 - Add app support for events - #7622 by @IKarbowiak
 - Fulfillment confirmation - #7675 by @tomaszszymanski129
@@ -305,6 +307,8 @@ All notable, unreleased changes to this project will be documented in this file.
   `OrderTaxedPricesData` instead of `TaxedMoney`.
   - Rename checkout interfaces: `CheckoutTaxedPricesData` instead of `TaxedPricesData`
   and `CheckoutPricesData` instead of `PricesData`
+- Do no allow using `id` for updating checkout and order metadata - #8906 by @IKarbowiak
+  - Use `token` instead
 
 ### Other
 
