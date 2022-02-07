@@ -29,7 +29,7 @@ from prices import Money, TaxedMoney, fixed_discount
 
 from ..account.models import Address, StaffNotificationRecipient, User
 from ..app.models import App, AppExtension, AppInstallation
-from ..app.types import AppExtensionTarget, AppExtensionType, AppExtensionView, AppType
+from ..app.types import AppExtensionMount, AppExtensionTarget, AppType
 from ..attribute import AttributeEntityType, AttributeInputType, AttributeType
 from ..attribute.models import (
     Attribute,
@@ -511,7 +511,7 @@ def checkout_with_preorders_only(
     preorder_variant_with_end_date,
     preorder_variant_channel_threshold,
 ):
-    lines = fetch_checkout_lines(checkout)
+    lines, _ = fetch_checkout_lines(checkout)
     checkout_info = fetch_checkout_info(checkout, lines, [], get_plugins_manager())
     add_variant_to_checkout(checkout_info, preorder_variant_with_end_date, 2)
     add_variant_to_checkout(checkout_info, preorder_variant_channel_threshold, 2)
@@ -524,7 +524,7 @@ def checkout_with_preorders_only(
 def checkout_with_preorders_and_regular_variant(
     checkout, stocks_for_cc, preorder_variant_with_end_date, product_variant_list
 ):
-    lines = fetch_checkout_lines(checkout)
+    lines, _ = fetch_checkout_lines(checkout)
     checkout_info = fetch_checkout_info(checkout, lines, [], get_plugins_manager())
     add_variant_to_checkout(checkout_info, preorder_variant_with_end_date, 2)
     add_variant_to_checkout(checkout_info, product_variant_list[0], 2)
@@ -1320,6 +1320,22 @@ def numeric_attribute(db):
 
 
 @pytest.fixture
+def numeric_attribute_without_unit(db):
+    attribute = Attribute.objects.create(
+        slug="count",
+        name="Count",
+        type=AttributeType.PRODUCT_TYPE,
+        input_type=AttributeInputType.NUMERIC,
+        filterable_in_storefront=True,
+        filterable_in_dashboard=True,
+        available_in_grid=True,
+    )
+    AttributeValue.objects.create(attribute=attribute, name="9", slug="9")
+    AttributeValue.objects.create(attribute=attribute, name="15", slug="15")
+    return attribute
+
+
+@pytest.fixture
 def file_attribute(db):
     attribute = Attribute.objects.create(
         slug="image",
@@ -1826,6 +1842,7 @@ def product_price_0(category, warehouse, channel_USD):
         channel=channel_USD,
         is_published=True,
         visible_in_listings=True,
+        available_for_purchase=datetime.date(1999, 1, 1),
     )
     variant = ProductVariant.objects.create(product=product, sku="SKU_C")
     ProductVariantChannelListing.objects.create(
@@ -2526,6 +2543,7 @@ def product_without_shipping(category, warehouse, channel_USD):
         channel=channel_USD,
         is_published=True,
         visible_in_listings=True,
+        available_for_purchase=datetime.date(1999, 1, 1),
     )
     variant = ProductVariant.objects.create(product=product, sku="SKU_B")
     ProductVariantChannelListing.objects.create(
@@ -2588,6 +2606,7 @@ def product_list(product_type, category, warehouse, channel_USD, channel_PLN):
                 discounted_price_amount=10,
                 currency=channel_USD.currency_code,
                 visible_in_listings=True,
+                available_for_purchase=datetime.date(1999, 1, 1),
             ),
             ProductChannelListing(
                 product=products[1],
@@ -2596,6 +2615,7 @@ def product_list(product_type, category, warehouse, channel_USD, channel_PLN):
                 discounted_price_amount=20,
                 currency=channel_USD.currency_code,
                 visible_in_listings=True,
+                available_for_purchase=datetime.date(1999, 1, 1),
             ),
             ProductChannelListing(
                 product=products[2],
@@ -2604,6 +2624,7 @@ def product_list(product_type, category, warehouse, channel_USD, channel_PLN):
                 discounted_price_amount=30,
                 currency=channel_USD.currency_code,
                 visible_in_listings=True,
+                available_for_purchase=datetime.date(1999, 1, 1),
             ),
         ]
     )
@@ -5013,9 +5034,7 @@ def app_with_extensions(app, permission_manage_products):
         app=app,
         label="Create product with App",
         url="www.example.com/app-product",
-        view=AppExtensionView.PRODUCT,
-        type=AppExtensionType.OVERVIEW,
-        target=AppExtensionTarget.MORE_ACTIONS,
+        mount=AppExtensionMount.PRODUCT_OVERVIEW_MORE_ACTIONS,
     )
     extensions = AppExtension.objects.bulk_create(
         [
@@ -5024,9 +5043,7 @@ def app_with_extensions(app, permission_manage_products):
                 app=app,
                 label="Update product with App",
                 url="www.example.com/app-product-update",
-                view=AppExtensionView.PRODUCT,
-                type=AppExtensionType.DETAILS,
-                target=AppExtensionTarget.MORE_ACTIONS,
+                mount=AppExtensionMount.PRODUCT_DETAILS_MORE_ACTIONS,
             ),
         ]
     )
@@ -5102,6 +5119,15 @@ def webhook(app):
         name="Simple webhook", app=app, target_url="http://www.example.com/test"
     )
     webhook.events.create(event_type=WebhookEventAsyncType.ORDER_CREATED)
+    return webhook
+
+
+@pytest.fixture
+def any_webhook(app):
+    webhook = Webhook.objects.create(
+        name="Any webhook", app=app, target_url="http://www.example.com/any"
+    )
+    webhook.events.create(event_type=WebhookEventAsyncType.ANY)
     return webhook
 
 
