@@ -33,11 +33,19 @@ MUTATION_CHECKOUT_COMPLETE = """
     mutation checkoutComplete($token: UUID, $redirectUrl: String) {
         checkoutComplete(token: $token, redirectUrl: $redirectUrl) {
             order {
-                id,
+                id
                 token
                 original
                 origin
-            },
+                deliveryMethod {
+                    ... on Warehouse {
+                        id
+                    }
+                    ... on ShippingMethod {
+                        id
+                    }
+                }
+            }
             errors {
                 field,
                 message,
@@ -285,7 +293,7 @@ def test_checkout_complete(
 
 
 @pytest.mark.integration
-@patch("saleor.graphql.checkout.mutations.complete_checkout")
+@patch("saleor.graphql.checkout.mutations.checkout_complete.complete_checkout")
 def test_checkout_complete_by_app(
     mocked_complete_checkout,
     app_api_client,
@@ -349,7 +357,7 @@ def test_checkout_complete_by_app(
 
 
 @pytest.mark.integration
-@patch("saleor.graphql.checkout.mutations.complete_checkout")
+@patch("saleor.graphql.checkout.mutations.checkout_complete.complete_checkout")
 def test_checkout_complete_by_app_with_missing_permission(
     mocked_complete_checkout,
     app_api_client,
@@ -2006,6 +2014,73 @@ def test_checkout_complete_with_preorder_variant(
         pk=checkout.pk
     ).exists(), "Checkout should have been deleted"
     order_confirmed_mock.assert_called_once_with(order)
+
+
+def test_checkout_complete_with_click_collect_preorder_fails_for_disabled_warehouse(
+    warehouse_for_cc,
+    checkout_with_items_for_cc,
+    address,
+    api_client,
+    payment_dummy,
+):
+    initial_order_count = Order.objects.count()
+    checkout = checkout_with_items_for_cc
+    variables = {"token": checkout.token, "redirectUrl": "https://www.example.com"}
+
+    checkout.billing_address = address
+    checkout.collection_point = warehouse_for_cc
+
+    checkout_line = checkout.lines.first()
+    checkout_line.variant.is_preorder = True
+    checkout_line.variant.preorder_global_threshold = 100
+    checkout_line.variant.save()
+
+    for line in checkout.lines.all():
+        if line.variant.channel_listings.filter(channel=checkout.channel).exists():
+            continue
+
+        line.variant.channel_listings.create(
+            channel=checkout.channel,
+            price_amount=Decimal(15),
+            currency=checkout.currency,
+        )
+
+    checkout.save(
+        update_fields=["shipping_address", "billing_address", "collection_point"]
+    )
+
+    warehouse_for_cc.click_and_collect_option = WarehouseClickAndCollectOption.DISABLED
+    warehouse_for_cc.save()
+
+    manager = get_plugins_manager()
+    lines, _ = fetch_checkout_lines(checkout)
+    checkout_info = fetch_checkout_info(checkout, lines, [], manager)
+    total = calculations.checkout_total(
+        manager=manager, checkout_info=checkout_info, lines=lines, address=address
+    )
+
+    assert not checkout_info.valid_pick_up_points
+    assert not checkout_info.delivery_method_info.is_method_in_valid_methods(
+        checkout_info
+    )
+
+    payment = payment_dummy
+    payment.is_active = True
+    payment.order = None
+    payment.total = total.gross.amount
+    payment.currency = total.gross.currency
+    payment.checkout = checkout
+    payment.save()
+
+    assert not payment.transactions.exists()
+
+    response = api_client.post_graphql(MUTATION_CHECKOUT_COMPLETE, variables)
+    content = get_graphql_content(response)["data"]["checkoutComplete"]
+
+    assert (
+        content["errors"][0]["code"] == CheckoutErrorCode.INVALID_SHIPPING_METHOD.name
+    )
+    assert Order.objects.count() == initial_order_count
 
 
 def test_checkout_complete_variant_channel_listing_does_not_exist(

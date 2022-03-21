@@ -1,5 +1,5 @@
 from decimal import Decimal
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import graphene
 import pytest
@@ -21,6 +21,7 @@ from ...payment import ChargeStatus
 from ...payment.models import Payment
 from ...plugins.manager import get_plugins_manager
 from ...product.models import Collection
+from ...warehouse import WarehouseClickAndCollectOption
 from ...warehouse.models import Stock, Warehouse
 from ...warehouse.tests.utils import get_quantity_allocated_for_stock
 from .. import FulfillmentStatus, OrderEvents, OrderStatus
@@ -38,7 +39,6 @@ from ..notifications import (
     get_default_fulfillment_payload,
     send_fulfillment_confirmation_to_customer,
 )
-from ..templatetags.order_lines import display_translated_order_line_name
 from ..utils import (
     add_variant_to_order,
     change_order_line_quantity,
@@ -789,35 +789,6 @@ def test_validate_voucher_in_order_without_voucher(
 
 
 @pytest.mark.parametrize(
-    "product_name, variant_name, translated_product_name, translated_variant_name,"
-    "expected_display_name",
-    [
-        ("product", "variant", "", "", "product (variant)"),
-        ("product", "", "", "", "product"),
-        ("product", "", "productPL", "", "productPL"),
-        ("product", "variant", "productPL", "", "productPL (variant)"),
-        ("product", "variant", "productPL", "variantPl", "productPL (variantPl)"),
-        ("product", "variant", "", "variantPl", "product (variantPl)"),
-    ],
-)
-def test_display_translated_order_line_name(
-    product_name,
-    variant_name,
-    translated_product_name,
-    translated_variant_name,
-    expected_display_name,
-):
-    order_line = MagicMock(
-        product_name=product_name,
-        variant_name=variant_name,
-        translated_product_name=translated_product_name,
-        translated_variant_name=translated_variant_name,
-    )
-    display_name = display_translated_order_line_name(order_line)
-    assert display_name == expected_display_name
-
-
-@pytest.mark.parametrize(
     "subtotal, discount_value, discount_type, min_spent_amount, expected_value",
     [
         ("100", 10, DiscountValueType.FIXED, None, 10),
@@ -1302,7 +1273,11 @@ def test_available_collection_points_for_preorders_variants_in_order(
     api_client, staff_api_client, order_with_preorder_lines, permission_manage_orders
 ):
     expected_collection_points = list(
-        Warehouse.objects.for_country("US").values("name")
+        Warehouse.objects.for_country("US")
+        .exclude(
+            click_and_collect_option=WarehouseClickAndCollectOption.DISABLED,
+        )
+        .values("name")
     )
     response = staff_api_client.post_graphql(
         GET_ORDER_AVAILABLE_COLLECTION_POINTS,
@@ -1323,10 +1298,15 @@ def test_available_collection_points_for_preorders_and_regular_variants_in_order
     staff_api_client,
     order_with_preorder_lines,
     permission_manage_orders,
-    warehouse,
 ):
+    expected_collection_points = list(
+        Warehouse.objects.for_country("US")
+        .exclude(
+            click_and_collect_option=WarehouseClickAndCollectOption.DISABLED,
+        )
+        .values("name")
+    )
 
-    expected_collection_points = [{"name": warehouse.name}]
     response = staff_api_client.post_graphql(
         GET_ORDER_AVAILABLE_COLLECTION_POINTS,
         variables={

@@ -9,8 +9,7 @@ from django_countries.fields import Country
 from freezegun import freeze_time
 from prices import Money, TaxedMoney
 
-from ...account.models import Address, User
-from ...account.utils import store_user_address
+from ...account.models import Address
 from ...core.taxes import zero_money
 from ...discount import DiscountValueType, VoucherType
 from ...discount.models import NotApplicable, Voucher, VoucherChannelListing
@@ -18,7 +17,7 @@ from ...payment.models import Payment
 from ...plugins.manager import get_plugins_manager
 from ...shipping.interface import ShippingMethodData
 from ...shipping.models import ShippingZone
-from .. import AddressType, calculations
+from .. import calculations
 from ..fetch import (
     CheckoutInfo,
     CheckoutLineInfo,
@@ -818,16 +817,13 @@ def test_recalculate_checkout_discount_with_sale(
 
     recalculate_checkout_discount(manager, checkout_info, lines, [discount_info])
     assert checkout.discount == Money("1.50", "USD")
-    assert (
-        calculations.checkout_total(
-            manager=manager,
-            checkout_info=checkout_info,
-            lines=lines,
-            address=checkout.shipping_address,
-            discounts=[discount_info],
-        ).gross
-        == Money("13.50", "USD")
-    )
+    assert calculations.checkout_total(
+        manager=manager,
+        checkout_info=checkout_info,
+        lines=lines,
+        address=checkout.shipping_address,
+        discounts=[discount_info],
+    ).gross == Money("13.50", "USD")
 
 
 def test_recalculate_checkout_discount_voucher_not_applicable(
@@ -873,15 +869,12 @@ def test_recalculate_checkout_discount_free_shipping_subtotal_less_than_shipping
     lines, _ = fetch_checkout_lines(checkout)
     checkout_info = fetch_checkout_info(checkout, lines, [], manager)
     channel_listing = shipping_method.channel_listings.get(channel_id=channel_USD.id)
-    channel_listing.price = (
-        calculations.checkout_subtotal(
-            manager=manager,
-            checkout_info=checkout_info,
-            lines=lines,
-            address=checkout.shipping_address,
-        ).gross
-        + Money("10.00", "USD")
-    )
+    channel_listing.price = calculations.checkout_subtotal(
+        manager=manager,
+        checkout_info=checkout_info,
+        lines=lines,
+        address=checkout.shipping_address,
+    ).gross + Money("10.00", "USD")
     channel_listing.save()
 
     checkout_info = fetch_checkout_info(checkout, lines, [], manager)
@@ -915,15 +908,12 @@ def test_recalculate_checkout_discount_free_shipping_subtotal_bigger_than_shippi
     lines, _ = fetch_checkout_lines(checkout)
     checkout_info = fetch_checkout_info(checkout, lines, [], manager)
     channel_listing = shipping_method.channel_listings.get(channel=channel_USD)
-    channel_listing.price = (
-        calculations.checkout_subtotal(
-            manager=manager,
-            checkout_info=checkout_info,
-            lines=lines,
-            address=checkout.shipping_address,
-        ).gross
-        - Money("1.00", "USD")
-    )
+    channel_listing.price = calculations.checkout_subtotal(
+        manager=manager,
+        checkout_info=checkout_info,
+        lines=lines,
+        address=checkout.shipping_address,
+    ).gross - Money("1.00", "USD")
     channel_listing.save()
 
     checkout_info = fetch_checkout_info(checkout, lines, [], manager)
@@ -1153,55 +1143,6 @@ def test_add_voucher_to_checkout_fail(
         )
 
     assert checkout_with_item.voucher_code is None
-
-
-def test_store_user_address_uses_existing_one(address):
-    """Ensure storing an address that is already associated to the given user doesn't
-    create a new address, but uses the existing one instead.
-    """
-    user = User.objects.create_user("test@example.com", "password")
-    user.addresses.add(address)
-
-    expected_user_addresses_count = 1
-
-    manager = get_plugins_manager()
-    store_user_address(user, address, AddressType.BILLING, manager)
-
-    assert user.addresses.count() == expected_user_addresses_count
-    assert user.default_billing_address_id == address.pk
-
-
-def test_store_user_address_uses_existing_one_despite_duplicated(address):
-    """Ensure storing an address handles the possibility of an user
-    having the same address associated to them multiple time is handled properly.
-
-    It should use the first identical address associated to the user.
-    """
-    same_address = Address.objects.create(**address.as_data())
-    user = User.objects.create_user("test@example.com", "password")
-    user.addresses.set([address, same_address])
-
-    expected_user_addresses_count = 2
-
-    manager = get_plugins_manager()
-    store_user_address(user, address, AddressType.BILLING, manager)
-
-    assert user.addresses.count() == expected_user_addresses_count
-    assert user.default_billing_address_id == address.pk
-
-
-def test_store_user_address_create_new_address_if_not_associated(address):
-    """Ensure storing an address that is not associated to the given user
-    triggers the creation of a new address, but uses the existing one instead.
-    """
-    user = User.objects.create_user("test@example.com", "password")
-    expected_user_addresses_count = 1
-
-    manager = get_plugins_manager()
-    store_user_address(user, address, AddressType.BILLING, manager)
-
-    assert user.addresses.count() == expected_user_addresses_count
-    assert user.default_billing_address_id != address.pk
 
 
 def test_get_last_active_payment(checkout_with_payments):

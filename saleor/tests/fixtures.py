@@ -128,7 +128,6 @@ from ..warehouse.models import (
 )
 from ..webhook.event_types import WebhookEventAsyncType, WebhookEventSyncType
 from ..webhook.models import Webhook, WebhookEvent
-from ..wishlist.models import Wishlist
 from .utils import dummy_editorjs
 
 
@@ -473,6 +472,15 @@ def checkout_with_items(checkout, product_list, product):
         add_variant_to_checkout(checkout_info, variant, 1)
     checkout.refresh_from_db()
     return checkout
+
+
+@pytest.fixture
+def checkout_with_items_and_shipping(checkout_with_items, address, shipping_method):
+    checkout_with_items.shipping_address = address
+    checkout_with_items.shipping_method = shipping_method
+    checkout_with_items.billing_address = address
+    checkout_with_items.save()
+    return checkout_with_items
 
 
 @pytest.fixture
@@ -1085,6 +1093,70 @@ def color_attribute(db):
     AttributeValue.objects.create(attribute=attribute, name="Red", slug="red")
     AttributeValue.objects.create(attribute=attribute, name="Blue", slug="blue")
     return attribute
+
+
+@pytest.fixture
+def attribute_without_values():
+    return Attribute.objects.create(
+        slug="dropdown",
+        name="Dropdown",
+        type=AttributeType.PRODUCT_TYPE,
+        filterable_in_storefront=True,
+        filterable_in_dashboard=True,
+        available_in_grid=True,
+        visible_in_storefront=True,
+        entity_type=None,
+    )
+
+
+@pytest.fixture
+def product_type_with_product_attributes(attribute_without_values):
+    product_type = ProductType.objects.create(
+        name="product_type_with_product_attributes",
+        slug="product-type-with-product-attributes",
+        has_variants=False,
+        is_shipping_required=False,
+        weight=0,
+    )
+    product_type.product_attributes.add(attribute_without_values)
+    return product_type
+
+
+@pytest.fixture
+def product_type_with_variant_attributes(attribute_without_values):
+    product_type = ProductType.objects.create(
+        name="product_type_with_variant_attributes",
+        slug="product-type-with-variant-attributes",
+        has_variants=False,
+        is_shipping_required=False,
+        weight=0,
+    )
+    product_type.variant_attributes.add(attribute_without_values)
+    return product_type
+
+
+@pytest.fixture
+def product_with_product_attributes(
+    product_type_with_product_attributes, non_default_category
+):
+    return Product.objects.create(
+        name="product_with_product_attributes",
+        slug="product-with-product-attributes",
+        product_type=product_type_with_product_attributes,
+        category=non_default_category,
+    )
+
+
+@pytest.fixture
+def product_with_variant_attributes(
+    product_type_with_variant_attributes, non_default_category
+):
+    return Product.objects.create(
+        name="product_with_variant_attributes",
+        slug="product-with-variant-attributes",
+        product_type=product_type_with_variant_attributes,
+        category=non_default_category,
+    )
 
 
 @pytest.fixture
@@ -3186,6 +3258,12 @@ def order_line_with_allocation_in_many_stocks(
         ]
     )
 
+    stocks_to_update = list(stocks)
+    stocks_to_update[0].quantity_allocated = 2
+    stocks_to_update[1].quantity_allocated = 1
+
+    Stock.objects.bulk_update(stocks_to_update, ["quantity_allocated"])
+
     return order_line
 
 
@@ -3231,6 +3309,9 @@ def order_line_with_one_allocation(
     Allocation.objects.create(
         order_line=order_line, stock=stocks[0], quantity_allocated=1
     )
+    stock = stocks[0]
+    stock.quantity_allocated = 1
+    stock.save(update_fields=["quantity_allocated"])
 
     return order_line
 
@@ -3999,10 +4080,11 @@ def fulfillment_awaiting_approval(fulfilled_order):
 
 
 @pytest.fixture
-def draft_order(order_with_lines):
+def draft_order(order_with_lines, shipping_method):
     Allocation.objects.filter(order_line__order=order_with_lines).delete()
     order_with_lines.status = OrderStatus.DRAFT
     order_with_lines.origin = OrderOrigin.DRAFT
+    order_with_lines.shipping_method = shipping_method
     order_with_lines.save(update_fields=["status", "origin"])
     return order_with_lines
 
@@ -4489,7 +4571,7 @@ def page_with_rich_text_attribute(db, page_type_with_rich_text_attribute):
 @pytest.fixture
 def page_list(db, page_type):
     data_1 = {
-        "slug": "test-url",
+        "slug": "test-url-1",
         "title": "Test page",
         "content": dummy_editorjs("Test content."),
         "is_published": True,
@@ -5139,32 +5221,6 @@ def fake_payment_interface(mocker):
 @pytest.fixture
 def staff_notification_recipient(db, staff_user):
     return StaffNotificationRecipient.objects.create(active=True, user=staff_user)
-
-
-@pytest.fixture
-def customer_wishlist(customer_user):
-    return Wishlist.objects.create(user=customer_user)
-
-
-@pytest.fixture
-def customer_wishlist_item(customer_wishlist, product_with_single_variant):
-    product = product_with_single_variant
-    assert product.variants.count() == 1
-    variant = product.variants.first()
-    item = customer_wishlist.add_variant(variant)
-    return item
-
-
-@pytest.fixture
-def customer_wishlist_item_with_two_variants(
-    customer_wishlist, product_with_two_variants
-):
-    product = product_with_two_variants
-    assert product.variants.count() == 2
-    [variant_1, variant_2] = product.variants.all()
-    item = customer_wishlist.add_variant(variant_1)
-    item.variants.add(variant_2)
-    return item
 
 
 @pytest.fixture
