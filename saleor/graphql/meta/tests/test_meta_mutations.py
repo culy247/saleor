@@ -7,6 +7,8 @@ import pytest
 from django.core.exceptions import ValidationError
 from django.db import transaction
 
+from ....account.error_codes import AccountErrorCode
+from ....account.models import User
 from ....checkout.models import Checkout
 from ....core.error_codes import MetadataErrorCode
 from ....core.models import ModelWithMetadata
@@ -195,6 +197,23 @@ def test_add_public_metadata_for_customer_as_app(
     # then
     assert item_contains_proper_public_metadata(
         response["data"]["updateMetadata"]["item"], customer_user, customer_id
+    )
+
+
+def test_change_metadata_for_non_existing_user(app_api_client, customer_user):
+    # given the non-existing user ID
+    last_id = User.objects.order_by("id").values_list("id", flat=True).last()
+    customer_id = graphene.Node.to_global_id("User", last_id + 100)
+
+    # when
+    response = execute_update_public_metadata_for_item(
+        app_api_client, [], customer_id, "User"
+    )
+
+    # then
+    assert (
+        response["data"]["updateMetadata"]["errors"][0]["code"]
+        == AccountErrorCode.NOT_FOUND.name
     )
 
 
@@ -636,6 +655,48 @@ def test_add_public_metadata_for_app(staff_api_client, permission_manage_apps, a
     response = execute_update_public_metadata_for_item(
         staff_api_client,
         permission_manage_apps,
+        app_id,
+        "App",
+    )
+
+    # then
+    assert item_contains_proper_public_metadata(
+        response["data"]["updateMetadata"]["item"], app, app_id
+    )
+
+
+def test_add_public_metadata_for_app_by_different_app(
+    app_api_client, permission_manage_apps, app, payment_app
+):
+    # given
+    app_id = graphene.Node.to_global_id("App", payment_app.pk)
+    app_api_client.app = app
+
+    # when
+    response = execute_update_public_metadata_for_item(
+        app_api_client,
+        permission_manage_apps,
+        app_id,
+        "App",
+    )
+
+    # then
+    assert item_contains_proper_public_metadata(
+        response["data"]["updateMetadata"]["item"], payment_app, app_id
+    )
+
+
+def test_add_public_metadata_for_app_that_is_owner(
+    app_api_client, permission_manage_apps, app
+):
+    # given
+    app_id = graphene.Node.to_global_id("App", app.pk)
+    app_api_client.app = app
+
+    # when
+    response = execute_update_public_metadata_for_item(
+        app_api_client,
+        None,
         app_id,
         "App",
     )
@@ -2260,6 +2321,52 @@ def test_add_private_metadata_for_app(staff_api_client, permission_manage_apps, 
     response = execute_update_private_metadata_for_item(
         staff_api_client,
         permission_manage_apps,
+        app_id,
+        "App",
+    )
+
+    # then
+    assert item_contains_proper_private_metadata(
+        response["data"]["updatePrivateMetadata"]["item"],
+        app,
+        app_id,
+    )
+
+
+def test_add_private_metadata_for_app_by_different_app(
+    app_api_client, permission_manage_apps, app, payment_app
+):
+    # given
+    app_id = graphene.Node.to_global_id("App", payment_app.pk)
+    app_api_client.app = app
+
+    # when
+    response = execute_update_private_metadata_for_item(
+        app_api_client,
+        permission_manage_apps,
+        app_id,
+        "App",
+    )
+
+    # then
+    assert item_contains_proper_private_metadata(
+        response["data"]["updatePrivateMetadata"]["item"],
+        payment_app,
+        app_id,
+    )
+
+
+def test_add_private_metadata_by_app_that_is_owner(
+    app_api_client, permission_manage_apps, app
+):
+    # given
+    app_id = graphene.Node.to_global_id("App", app.pk)
+    app_api_client.app = app
+
+    # when
+    response = execute_update_private_metadata_for_item(
+        app_api_client,
+        None,
         app_id,
         "App",
     )
