@@ -24,15 +24,30 @@ PRODUCT_FIELDS_TO_PREFETCH = [
     "attributes__assignment__attribute",
 ]
 
+PRODUCTS_BATCH_SIZE = 300
+# Setting threshold to 300 results in about 350MB of memory usage
+# when testing locally. Should be adjusted after some time by running
+# update task on a large dataset and measureing the total time, memory usage
+# and time of a single SQL statement.
+
 
 def update_products_search_vector(products: "QuerySet"):
-    products = products.prefetch_related(*PRODUCT_FIELDS_TO_PREFETCH)
-    for product in products:
-        product.search_vector = prepare_product_search_vector_value(
-            product, already_prefetched=True
+    last_id = 0
+    while True:
+        products_batch = list(
+            products.order_by("id").filter(id__gt=last_id)[:PRODUCTS_BATCH_SIZE]
         )
+        if not products_batch:
+            break
+        last_id = products_batch[-1].id
 
-    Product.objects.bulk_update(products, ["search_vector", "updated_at"])
+        prefetch_related_objects(products_batch, *PRODUCT_FIELDS_TO_PREFETCH)
+        for product in products_batch:
+            product.search_vector = prepare_product_search_vector_value(
+                product, already_prefetched=True
+            )
+
+        Product.objects.bulk_update(products_batch, ["search_vector", "updated_at"])
 
 
 def update_product_search_vector(product: "Product"):
@@ -63,19 +78,18 @@ def prepare_product_search_vector_value(
 def generate_variants_search_vector_value(product: "Product") -> Optional[SearchVector]:
     variants = list(product.variants.all())
 
-    if not variants:
+    variant_vectors = [
+        SearchVector(Value(variant.sku), Value(variant.name), weight="A")
+        if variant.sku
+        else SearchVector(Value(variant.name), weight="A")
+        for variant in variants
+        if variant.sku or variant.name
+    ]
+
+    if not variant_vectors:
         return None
 
-    search_vector = reduce(
-        add,
-        (
-            SearchVector(Value(variant.sku), Value(variant.name), weight="A")
-            if variant.sku
-            else SearchVector(Value(variant.name), weight="A")
-            for variant in variants
-            if variant.sku or variant.name
-        ),
-    )
+    search_vector = reduce(add, variant_vectors)
 
     for variant in variants:
         attribute_vector = generate_attributes_search_vector_value(
