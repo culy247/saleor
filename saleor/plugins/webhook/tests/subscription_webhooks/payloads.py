@@ -4,6 +4,7 @@ import graphene
 from django.utils import timezone
 
 from ..... import __version__
+from .....graphql.attribute.enums import AttributeInputTypeEnum, AttributeTypeEnum
 from .....product.models import Product
 
 
@@ -15,6 +16,19 @@ def generate_app_payload(app, app_global_id):
                 "isActive": app.is_active,
                 "name": app.name,
                 "appUrl": app.app_url,
+            }
+        }
+    )
+
+
+def generate_attribute_payload(attribute):
+    return json.dumps(
+        {
+            "attribute": {
+                "name": attribute.name,
+                "slug": attribute.slug,
+                "type": AttributeTypeEnum.get(attribute.type).name,
+                "inputType": AttributeInputTypeEnum.get(attribute.input_type).name,
             }
         }
     )
@@ -94,7 +108,7 @@ def generate_customer_payload(customer):
             "email": customer.email,
             "firstName": customer.first_name,
             "lastName": customer.last_name,
-            "isStaff": customer.is_staff,
+            "isStaff": False,
             "isActive": customer.is_active,
             "addresses": [
                 {"id": graphene.Node.to_global_id("Address", address.pk)}
@@ -107,6 +121,18 @@ def generate_customer_payload(customer):
             "defaultBillingAddress": (
                 generate_address_payload(customer.default_billing_address)
             ),
+        }
+    }
+
+
+def generate_staff_payload(staff_user):
+    return {
+        "user": {
+            "email": staff_user.email,
+            "firstName": staff_user.first_name,
+            "lastName": staff_user.last_name,
+            "isStaff": True,
+            "isActive": staff_user.is_active,
         }
     }
 
@@ -163,6 +189,20 @@ def generate_page_payload(page):
                     ],
                 },
                 {"attribute": {"slug": page_attributes[1].slug}, "values": []},
+            ],
+        }
+    }
+
+
+def generate_page_type_payload(page_type):
+    page_type_id = graphene.Node.to_global_id("PageType", page_type.pk)
+    return {
+        "pageType": {
+            "id": page_type_id,
+            "name": page_type.name,
+            "slug": page_type.slug,
+            "attributes": [
+                {"slug": ap.attribute.slug} for ap in page_type.attributepage.all()
             ],
         }
     }

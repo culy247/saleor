@@ -1300,7 +1300,11 @@ type Webhook implements Node {
   """Informs if webhook is activated."""
   isActive: Boolean!
 
-  """Used to create a hash signature with each payload."""
+  """
+  Used to create a hash signature with each payload.
+  
+  If not set, since Saleor 3.5, your payload will be signed using private key used also to sign JWT tokens.
+  """
   secretKey: String
 
   """Used to define payloads for specific events."""
@@ -1327,6 +1331,15 @@ enum WebhookEventTypeEnum {
   """All the events."""
   ANY_EVENTS
 
+  """A new address created."""
+  ADDRESS_CREATED
+
+  """An address updated."""
+  ADDRESS_UPDATED
+
+  """An address deleted."""
+  ADDRESS_DELETED
+
   """A new app installed."""
   APP_INSTALLED
 
@@ -1338,6 +1351,15 @@ enum WebhookEventTypeEnum {
 
   """An app status is changed."""
   APP_STATUS_CHANGED
+
+  """A new attribute is created."""
+  ATTRIBUTE_CREATED
+
+  """An attribute is updated."""
+  ATTRIBUTE_UPDATED
+
+  """An attribute is deleted."""
+  ATTRIBUTE_DELETED
 
   """A new category created."""
   CATEGORY_CREATED
@@ -1488,6 +1510,15 @@ enum WebhookEventTypeEnum {
   """A page is deleted."""
   PAGE_DELETED
 
+  """A new page type is created."""
+  PAGE_TYPE_CREATED
+
+  """A page type is updated."""
+  PAGE_TYPE_UPDATED
+
+  """A page type is deleted."""
+  PAGE_TYPE_DELETED
+
   """A new shipping price is created."""
   SHIPPING_PRICE_CREATED
 
@@ -1505,6 +1536,11 @@ enum WebhookEventTypeEnum {
 
   """A shipping zone is deleted."""
   SHIPPING_ZONE_DELETED
+
+  """A staff user is deleted"""
+  STAFF_CREATED
+  STAFF_UPDATED
+  STAFF_DELETED
   TRANSACTION_ACTION_REQUEST
   TRANSLATION_CREATED
   TRANSLATION_UPDATED
@@ -1578,6 +1614,15 @@ enum WebhookEventTypeAsyncEnum {
   """All the events."""
   ANY_EVENTS
 
+  """A new address created."""
+  ADDRESS_CREATED
+
+  """An address updated."""
+  ADDRESS_UPDATED
+
+  """An address deleted."""
+  ADDRESS_DELETED
+
   """A new app installed."""
   APP_INSTALLED
 
@@ -1589,6 +1634,15 @@ enum WebhookEventTypeAsyncEnum {
 
   """An app status is changed."""
   APP_STATUS_CHANGED
+
+  """A new attribute is created."""
+  ATTRIBUTE_CREATED
+
+  """An attribute is updated."""
+  ATTRIBUTE_UPDATED
+
+  """An attribute is deleted."""
+  ATTRIBUTE_DELETED
 
   """A new category created."""
   CATEGORY_CREATED
@@ -1739,6 +1793,15 @@ enum WebhookEventTypeAsyncEnum {
   """A page is deleted."""
   PAGE_DELETED
 
+  """A new page type is created."""
+  PAGE_TYPE_CREATED
+
+  """A page type is updated."""
+  PAGE_TYPE_UPDATED
+
+  """A page type is deleted."""
+  PAGE_TYPE_DELETED
+
   """A new shipping price is created."""
   SHIPPING_PRICE_CREATED
 
@@ -1756,6 +1819,11 @@ enum WebhookEventTypeAsyncEnum {
 
   """A shipping zone is deleted."""
   SHIPPING_ZONE_DELETED
+
+  """A staff user is deleted"""
+  STAFF_CREATED
+  STAFF_UPDATED
+  STAFF_DELETED
   TRANSACTION_ACTION_REQUEST
   TRANSLATION_CREATED
   TRANSLATION_UPDATED
@@ -1865,7 +1933,7 @@ type App implements Node & ObjectWithMetadata {
   aboutApp: String
 
   """Description of the data privacy defined for this app."""
-  dataPrivacy: String
+  dataPrivacy: String @deprecated(reason: "This field will be removed in Saleor 4.0. Use `dataPrivacyUrl` instead.")
 
   """Url to details about the privacy policy on the app owner page."""
   dataPrivacyUrl: String
@@ -1877,7 +1945,7 @@ type App implements Node & ObjectWithMetadata {
   supportUrl: String
 
   """Url to iframe with the configuration for the app."""
-  configurationUrl: String
+  configurationUrl: String @deprecated(reason: "This field will be removed in Saleor 4.0. Use `appUrl` instead.")
 
   """Url to iframe with the app."""
   appUrl: String
@@ -2245,10 +2313,16 @@ scalar JSONString
 
 """An enumeration."""
 enum WebhookSampleEventTypeEnum {
+  ADDRESS_CREATED
+  ADDRESS_UPDATED
+  ADDRESS_DELETED
   APP_INSTALLED
   APP_UPDATED
   APP_DELETED
   APP_STATUS_CHANGED
+  ATTRIBUTE_CREATED
+  ATTRIBUTE_UPDATED
+  ATTRIBUTE_DELETED
   CATEGORY_CREATED
   CATEGORY_UPDATED
   CATEGORY_DELETED
@@ -2302,12 +2376,18 @@ enum WebhookSampleEventTypeEnum {
   PAGE_CREATED
   PAGE_UPDATED
   PAGE_DELETED
+  PAGE_TYPE_CREATED
+  PAGE_TYPE_UPDATED
+  PAGE_TYPE_DELETED
   SHIPPING_PRICE_CREATED
   SHIPPING_PRICE_UPDATED
   SHIPPING_PRICE_DELETED
   SHIPPING_ZONE_CREATED
   SHIPPING_ZONE_UPDATED
   SHIPPING_ZONE_DELETED
+  STAFF_CREATED
+  STAFF_UPDATED
+  STAFF_DELETED
   TRANSACTION_ACTION_REQUEST
   TRANSLATION_CREATED
   TRANSLATION_UPDATED
@@ -4061,6 +4141,7 @@ enum AttributeInputTypeEnum {
   REFERENCE
   NUMERIC
   RICH_TEXT
+  PLAIN_TEXT
   SWATCH
   BOOLEAN
   DATE
@@ -4167,6 +4248,11 @@ type AttributeValue implements Node {
   """
   richText: JSONString
 
+  """
+  Represents the text of the attribute value, plain text without formating.
+  """
+  plainText: String
+
   """Represents the boolean value of the attribute value."""
   boolean: Boolean
 
@@ -4190,6 +4276,9 @@ type AttributeValueTranslation implements Node {
   Rich text format. For reference see https://editorjs.io/
   """
   richText: JSONString
+
+  """Attribute plain text value."""
+  plainText: String
 }
 
 type File {
@@ -5764,6 +5853,9 @@ type AttributeValueTranslatableContent implements Node {
   Rich text format. For reference see https://editorjs.io/
   """
   richText: JSONString
+
+  """Attribute plain text value."""
+  plainText: String
 
   """Returns translated attribute value fields for the given language code."""
   translation(
@@ -9384,6 +9476,11 @@ enum OrderSortField {
   NUMBER
 
   """
+  Sort orders by rank. Note: This option is available only with the `search` filter.
+  """
+  RANK
+
+  """
   Sort orders by creation date. 
   
   DEPRECATED: this field will be removed in Saleor 4.0.
@@ -9426,6 +9523,7 @@ input OrderFilterInput {
   ids: [ID!]
   giftCardUsed: Boolean
   giftCardBought: Boolean
+  numbers: [String!]
 }
 
 enum OrderStatusFilter {
@@ -12746,7 +12844,7 @@ type Mutation {
     DEPRECATED: this field will be removed in Saleor 4.0. Use `id` instead.
     """
     token: UUID
-  ): CheckoutLineDelete @deprecated(reason: "DEPRECATED: Will be removed in Saleor 4.0. Use `checkoutLinesDelete` instead.")
+  ): CheckoutLineDelete @deprecated(reason: "This field will be removed in Saleor 4.0. Use `checkoutLinesDelete` instead.")
 
   """Deletes checkout lines."""
   checkoutLinesDelete(
@@ -15234,6 +15332,9 @@ input AttributeValueInput {
 
   """Text content in JSON format."""
   richText: JSONString
+
+  """Plain text content."""
+  plainText: String
 
   """Represents the boolean value of the attribute value."""
   boolean: Boolean
@@ -19023,7 +19124,7 @@ input PaymentInput {
   
   Added in Saleor 3.1.
   """
-  storePaymentMethod: StorePaymentMethodEnum = none
+  storePaymentMethod: StorePaymentMethodEnum = NONE
 
   """
   User public metadata.
@@ -19364,6 +19465,11 @@ input AttributeValueCreateInput {
   """
   richText: JSONString
 
+  """
+  Represents the text of the attribute value, plain text without formating.
+  """
+  plainText: String
+
   """URL of the file attribute. Every time, a new value is created."""
   fileUrl: String
 
@@ -19448,6 +19554,11 @@ input AttributeValueUpdateInput {
   Rich text format. For reference see https://editorjs.io/
   """
   richText: JSONString
+
+  """
+  Represents the text of the attribute value, plain text without formating.
+  """
+  plainText: String
 
   """URL of the file attribute. Every time, a new value is created."""
   fileUrl: String
@@ -19553,6 +19664,9 @@ input AttributeValueTranslationInput {
   Rich text format. For reference see https://editorjs.io/
   """
   richText: JSONString
+
+  """Translated text."""
+  plainText: String
 }
 
 """
@@ -19745,9 +19859,13 @@ type Manifest {
   about: String
   permissions: [Permission!]
   appUrl: String
-  configurationUrl: String
+
+  """Url to iframe with the configuration for the app."""
+  configurationUrl: String @deprecated(reason: "This field will be removed in Saleor 4.0. Use `appUrl` instead.")
   tokenTargetUrl: String
-  dataPrivacy: String
+
+  """Description of the data privacy defined for this app."""
+  dataPrivacy: String @deprecated(reason: "This field will be removed in Saleor 4.0. Use `dataPrivacyUrl` instead.")
   dataPrivacyUrl: String
   homepageUrl: String
   supportUrl: String
@@ -20641,6 +20759,75 @@ enum VolumeUnitsEnum {
   ACRE_FT
 }
 
+type AddressCreated implements Event {
+  """Time of the event."""
+  issuedAt: DateTime
+
+  """Saleor version that triggered the event."""
+  version: String
+
+  """The user or application that triggered the event."""
+  issuingPrincipal: IssuingPrincipal
+
+  """The application receiving the webhook."""
+  recipient: App
+
+  """
+  The address the event relates to.
+  
+  Added in Saleor 3.5.
+  
+  Note: this API is currently in Feature Preview and can be subject to changes at later point.
+  """
+  address: Address
+}
+
+type AddressUpdated implements Event {
+  """Time of the event."""
+  issuedAt: DateTime
+
+  """Saleor version that triggered the event."""
+  version: String
+
+  """The user or application that triggered the event."""
+  issuingPrincipal: IssuingPrincipal
+
+  """The application receiving the webhook."""
+  recipient: App
+
+  """
+  The address the event relates to.
+  
+  Added in Saleor 3.5.
+  
+  Note: this API is currently in Feature Preview and can be subject to changes at later point.
+  """
+  address: Address
+}
+
+type AddressDeleted implements Event {
+  """Time of the event."""
+  issuedAt: DateTime
+
+  """Saleor version that triggered the event."""
+  version: String
+
+  """The user or application that triggered the event."""
+  issuingPrincipal: IssuingPrincipal
+
+  """The application receiving the webhook."""
+  recipient: App
+
+  """
+  The address the event relates to.
+  
+  Added in Saleor 3.5.
+  
+  Note: this API is currently in Feature Preview and can be subject to changes at later point.
+  """
+  address: Address
+}
+
 type AppInstalled implements Event {
   """Time of the event."""
   issuedAt: DateTime
@@ -20731,6 +20918,75 @@ type AppStatusChanged implements Event {
   Note: this API is currently in Feature Preview and can be subject to changes at later point.
   """
   app: App
+}
+
+type AttributeCreated implements Event {
+  """Time of the event."""
+  issuedAt: DateTime
+
+  """Saleor version that triggered the event."""
+  version: String
+
+  """The user or application that triggered the event."""
+  issuingPrincipal: IssuingPrincipal
+
+  """The application receiving the webhook."""
+  recipient: App
+
+  """
+  The attribute the event relates to.
+  
+  Added in Saleor 3.5.
+  
+  Note: this API is currently in Feature Preview and can be subject to changes at later point.
+  """
+  attribute: Attribute
+}
+
+type AttributeUpdated implements Event {
+  """Time of the event."""
+  issuedAt: DateTime
+
+  """Saleor version that triggered the event."""
+  version: String
+
+  """The user or application that triggered the event."""
+  issuingPrincipal: IssuingPrincipal
+
+  """The application receiving the webhook."""
+  recipient: App
+
+  """
+  The attribute the event relates to.
+  
+  Added in Saleor 3.5.
+  
+  Note: this API is currently in Feature Preview and can be subject to changes at later point.
+  """
+  attribute: Attribute
+}
+
+type AttributeDeleted implements Event {
+  """Time of the event."""
+  issuedAt: DateTime
+
+  """Saleor version that triggered the event."""
+  version: String
+
+  """The user or application that triggered the event."""
+  issuingPrincipal: IssuingPrincipal
+
+  """The application receiving the webhook."""
+  recipient: App
+
+  """
+  The attribute the event relates to.
+  
+  Added in Saleor 3.5.
+  
+  Note: this API is currently in Feature Preview and can be subject to changes at later point.
+  """
+  attribute: Attribute
 }
 
 type CategoryCreated implements Event {
@@ -22052,6 +22308,75 @@ type PageDeleted implements Event {
   page: Page
 }
 
+type PageTypeCreated implements Event {
+  """Time of the event."""
+  issuedAt: DateTime
+
+  """Saleor version that triggered the event."""
+  version: String
+
+  """The user or application that triggered the event."""
+  issuingPrincipal: IssuingPrincipal
+
+  """The application receiving the webhook."""
+  recipient: App
+
+  """
+  The page type the event relates to.
+  
+  Added in Saleor 3.5.
+  
+  Note: this API is currently in Feature Preview and can be subject to changes at later point.
+  """
+  pageType: PageType
+}
+
+type PageTypeUpdated implements Event {
+  """Time of the event."""
+  issuedAt: DateTime
+
+  """Saleor version that triggered the event."""
+  version: String
+
+  """The user or application that triggered the event."""
+  issuingPrincipal: IssuingPrincipal
+
+  """The application receiving the webhook."""
+  recipient: App
+
+  """
+  The page type the event relates to.
+  
+  Added in Saleor 3.5.
+  
+  Note: this API is currently in Feature Preview and can be subject to changes at later point.
+  """
+  pageType: PageType
+}
+
+type PageTypeDeleted implements Event {
+  """Time of the event."""
+  issuedAt: DateTime
+
+  """Saleor version that triggered the event."""
+  version: String
+
+  """The user or application that triggered the event."""
+  issuingPrincipal: IssuingPrincipal
+
+  """The application receiving the webhook."""
+  recipient: App
+
+  """
+  The page type the event relates to.
+  
+  Added in Saleor 3.5.
+  
+  Note: this API is currently in Feature Preview and can be subject to changes at later point.
+  """
+  pageType: PageType
+}
+
 type ShippingPriceCreated implements Event {
   """Time of the event."""
   issuedAt: DateTime
@@ -22242,6 +22567,75 @@ type ShippingZoneDeleted implements Event {
     """Slug of a channel for which the data should be returned."""
     channel: String
   ): ShippingZone
+}
+
+type StaffCreated implements Event {
+  """Time of the event."""
+  issuedAt: DateTime
+
+  """Saleor version that triggered the event."""
+  version: String
+
+  """The user or application that triggered the event."""
+  issuingPrincipal: IssuingPrincipal
+
+  """The application receiving the webhook."""
+  recipient: App
+
+  """
+  The user the event relates to.
+  
+  Added in Saleor 3.2.
+  
+  Note: this API is currently in Feature Preview and can be subject to changes at later point.
+  """
+  user: User
+}
+
+type StaffUpdated implements Event {
+  """Time of the event."""
+  issuedAt: DateTime
+
+  """Saleor version that triggered the event."""
+  version: String
+
+  """The user or application that triggered the event."""
+  issuingPrincipal: IssuingPrincipal
+
+  """The application receiving the webhook."""
+  recipient: App
+
+  """
+  The user the event relates to.
+  
+  Added in Saleor 3.2.
+  
+  Note: this API is currently in Feature Preview and can be subject to changes at later point.
+  """
+  user: User
+}
+
+type StaffDeleted implements Event {
+  """Time of the event."""
+  issuedAt: DateTime
+
+  """Saleor version that triggered the event."""
+  version: String
+
+  """The user or application that triggered the event."""
+  issuingPrincipal: IssuingPrincipal
+
+  """The application receiving the webhook."""
+  recipient: App
+
+  """
+  The user the event relates to.
+  
+  Added in Saleor 3.2.
+  
+  Note: this API is currently in Feature Preview and can be subject to changes at later point.
+  """
+  user: User
 }
 
 type TransactionActionRequest implements Event {

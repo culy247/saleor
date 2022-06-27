@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     # flake8: noqa
     from ..account.models import Address, User
     from ..app.models import App
+    from ..attribute.models import Attribute
     from ..checkout.fetch import CheckoutInfo, CheckoutLineInfo
     from ..checkout.models import Checkout
     from ..core.middleware import Requestor
@@ -48,7 +49,7 @@ if TYPE_CHECKING:
     from ..invoice.models import Invoice
     from ..menu.models import Menu, MenuItem
     from ..order.models import Fulfillment, Order, OrderLine
-    from ..page.models import Page
+    from ..page.models import Page, PageType
     from ..payment.interface import (
         CustomerSource,
         GatewayResponse,
@@ -219,15 +220,11 @@ class PluginsManager(PaymentInterface):
         discounts: Iterable[DiscountInfo],
     ) -> TaxedMoney:
         currency = checkout_info.checkout.currency
+
         default_value = base_calculations.base_checkout_total(
-            subtotal=self.calculate_checkout_subtotal(
-                checkout_info, lines, address, discounts
-            ),
-            shipping_price=self.calculate_checkout_shipping(
-                checkout_info, lines, address, discounts
-            ),
-            discount=checkout_info.checkout.discount,
-            currency=currency,
+            checkout_info,
+            discounts,
+            lines,
         )
 
         if default_value <= zero_taxed_money(currency):
@@ -346,6 +343,19 @@ class PluginsManager(PaymentInterface):
             order,
             channel_slug=order.channel.slug,
         ).quantize(Decimal(".0001"))
+
+    def update_taxes_for_order_lines(
+        self,
+        order: "Order",
+        lines: List["OrderLine"],
+    ):
+        lines = self.__run_method_on_plugins(
+            "update_taxes_for_order_lines",
+            lines,
+            order,
+            lines,
+        )
+        return lines
 
     def calculate_checkout_line_total(
         self,
@@ -797,6 +807,24 @@ class PluginsManager(PaymentInterface):
         default_value = None
         return self.__run_method_on_plugins("page_deleted", default_value, page)
 
+    def page_type_created(self, page_type: "PageType"):
+        default_value = None
+        return self.__run_method_on_plugins(
+            "page_type_created", default_value, page_type
+        )
+
+    def page_type_updated(self, page_type: "PageType"):
+        default_value = None
+        return self.__run_method_on_plugins(
+            "page_type_updated", default_value, page_type
+        )
+
+    def page_type_deleted(self, page_type: "PageType"):
+        default_value = None
+        return self.__run_method_on_plugins(
+            "page_type_deleted", default_value, page_type
+        )
+
     def transaction_action_request(
         self, payment_data: "TransactionActionData", channel_slug: str
     ):
@@ -807,6 +835,18 @@ class PluginsManager(PaymentInterface):
             payment_data,
             channel_slug=channel_slug,
         )
+
+    def address_created(self, address: "Address"):
+        default_value = None
+        return self.__run_method_on_plugins("address_created", default_value, address)
+
+    def address_updated(self, address: "Address"):
+        default_value = None
+        return self.__run_method_on_plugins("address_updated", default_value, address)
+
+    def address_deleted(self, address: "Address"):
+        default_value = None
+        return self.__run_method_on_plugins("address_deleted", default_value, address)
 
     def app_installed(self, app: "App"):
         default_value = None
@@ -823,6 +863,24 @@ class PluginsManager(PaymentInterface):
     def app_status_changed(self, app: "App"):
         default_value = None
         return self.__run_method_on_plugins("app_status_changed", default_value, app)
+
+    def attribute_created(self, attribute: "Attribute"):
+        default_value = None
+        return self.__run_method_on_plugins(
+            "attribute_created", default_value, attribute
+        )
+
+    def attribute_updated(self, attribute: "Attribute"):
+        default_value = None
+        return self.__run_method_on_plugins(
+            "attribute_updated", default_value, attribute
+        )
+
+    def attribute_deleted(self, attribute: "Attribute"):
+        default_value = None
+        return self.__run_method_on_plugins(
+            "attribute_deleted", default_value, attribute
+        )
 
     def category_created(self, category: "Category"):
         default_value = None
@@ -943,6 +1001,18 @@ class PluginsManager(PaymentInterface):
         return self.__run_method_on_plugins(
             "shipping_zone_deleted", default_value, shipping_zone
         )
+
+    def staff_created(self, staff_user: "User"):
+        default_value = None
+        return self.__run_method_on_plugins("staff_created", default_value, staff_user)
+
+    def staff_updated(self, staff_user: "User"):
+        default_value = None
+        return self.__run_method_on_plugins("staff_updated", default_value, staff_user)
+
+    def staff_deleted(self, staff_user: "User"):
+        default_value = None
+        return self.__run_method_on_plugins("staff_deleted", default_value, staff_user)
 
     def warehouse_created(self, warehouse: "Warehouse"):
         default_value = None

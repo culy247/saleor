@@ -23,7 +23,7 @@ from ...webhook.event_types import WebhookEventAsyncType
 from ..account.types import User as UserType
 from ..app.types import App as AppType
 from ..channel import ChannelContext
-from ..core.descriptions import ADDED_IN_32, ADDED_IN_34, PREVIEW_FEATURE
+from ..core.descriptions import ADDED_IN_32, ADDED_IN_34, ADDED_IN_35, PREVIEW_FEATURE
 from ..core.scalars import PositiveDecimal
 from ..payment.enums import TransactionActionEnum
 from ..payment.types import TransactionItem
@@ -70,10 +70,16 @@ class Event(graphene.Interface):
     @classmethod
     def get_type(cls, object_type: str):
         types = {
+            WebhookEventAsyncType.ADDRESS_CREATED: AddressCreated,
+            WebhookEventAsyncType.ADDRESS_UPDATED: AddressUpdated,
+            WebhookEventAsyncType.ADDRESS_DELETED: AddressDeleted,
             WebhookEventAsyncType.APP_INSTALLED: AppInstalled,
             WebhookEventAsyncType.APP_UPDATED: AppUpdated,
             WebhookEventAsyncType.APP_DELETED: AppDeleted,
             WebhookEventAsyncType.APP_STATUS_CHANGED: AppStatusChanged,
+            WebhookEventAsyncType.ATTRIBUTE_CREATED: AttributeCreated,
+            WebhookEventAsyncType.ATTRIBUTE_UPDATED: AttributeUpdated,
+            WebhookEventAsyncType.ATTRIBUTE_DELETED: AttributeDeleted,
             WebhookEventAsyncType.CATEGORY_CREATED: CategoryCreated,
             WebhookEventAsyncType.CATEGORY_UPDATED: CategoryUpdated,
             WebhookEventAsyncType.CATEGORY_DELETED: CategoryDeleted,
@@ -130,12 +136,18 @@ class Event(graphene.Interface):
             WebhookEventAsyncType.PAGE_CREATED: PageCreated,
             WebhookEventAsyncType.PAGE_UPDATED: PageUpdated,
             WebhookEventAsyncType.PAGE_DELETED: PageDeleted,
+            WebhookEventAsyncType.PAGE_TYPE_CREATED: PageTypeCreated,
+            WebhookEventAsyncType.PAGE_TYPE_UPDATED: PageTypeUpdated,
+            WebhookEventAsyncType.PAGE_TYPE_DELETED: PageTypeDeleted,
             WebhookEventAsyncType.SHIPPING_PRICE_CREATED: ShippingPriceCreated,
             WebhookEventAsyncType.SHIPPING_PRICE_UPDATED: ShippingPriceUpdated,
             WebhookEventAsyncType.SHIPPING_PRICE_DELETED: ShippingPriceDeleted,
             WebhookEventAsyncType.SHIPPING_ZONE_CREATED: ShippingZoneCreated,
             WebhookEventAsyncType.SHIPPING_ZONE_UPDATED: ShippingZoneUpdated,
             WebhookEventAsyncType.SHIPPING_ZONE_DELETED: ShippingZoneDeleted,
+            WebhookEventAsyncType.STAFF_CREATED: StaffCreated,
+            WebhookEventAsyncType.STAFF_UPDATED: StaffUpdated,
+            WebhookEventAsyncType.STAFF_DELETED: StaffDeleted,
             WebhookEventAsyncType.TRANSACTION_ACTION_REQUEST: TransactionActionRequest,
             WebhookEventAsyncType.TRANSLATION_CREATED: TranslationCreated,
             WebhookEventAsyncType.TRANSLATION_UPDATED: TranslationUpdated,
@@ -172,6 +184,33 @@ class Event(graphene.Interface):
         return info.context.requestor
 
 
+class AddressBase(AbstractType):
+    address = graphene.Field(
+        "saleor.graphql.account.types.Address",
+        description="The address the event relates to." + ADDED_IN_35 + PREVIEW_FEATURE,
+    )
+
+    @staticmethod
+    def resolve_address(root, _info):
+        _, address = root
+        return address
+
+
+class AddressCreated(ObjectType, AddressBase):
+    class Meta:
+        interfaces = (Event,)
+
+
+class AddressUpdated(ObjectType, AddressBase):
+    class Meta:
+        interfaces = (Event,)
+
+
+class AddressDeleted(ObjectType, AddressBase):
+    class Meta:
+        interfaces = (Event,)
+
+
 class AppBase(AbstractType):
     app = graphene.Field(
         "saleor.graphql.app.types.App",
@@ -202,6 +241,35 @@ class AppDeleted(ObjectType, AppBase):
 
 
 class AppStatusChanged(ObjectType, AppBase):
+    class Meta:
+        interfaces = (Event,)
+
+
+class AttributeBase(AbstractType):
+    attribute = graphene.Field(
+        "saleor.graphql.attribute.types.Attribute",
+        description="The attribute the event relates to."
+        + ADDED_IN_35
+        + PREVIEW_FEATURE,
+    )
+
+    @staticmethod
+    def resolve_attribute(root, _info):
+        _, attribute = root
+        return attribute
+
+
+class AttributeCreated(ObjectType, AttributeBase):
+    class Meta:
+        interfaces = (Event,)
+
+
+class AttributeUpdated(ObjectType, AttributeBase):
+    class Meta:
+        interfaces = (Event,)
+
+
+class AttributeDeleted(ObjectType, AttributeBase):
     class Meta:
         interfaces = (Event,)
 
@@ -730,6 +798,35 @@ class PageDeleted(ObjectType, PageBase):
         interfaces = (Event,)
 
 
+class PageTypeBase(AbstractType):
+    page_type = graphene.Field(
+        "saleor.graphql.page.types.PageType",
+        description="The page type the event relates to."
+        + ADDED_IN_35
+        + PREVIEW_FEATURE,
+    )
+
+    @staticmethod
+    def resolve_page_type(root, _info):
+        _, page_type = root
+        return page_type
+
+
+class PageTypeCreated(ObjectType, PageTypeBase):
+    class Meta:
+        interfaces = (Event,)
+
+
+class PageTypeUpdated(ObjectType, PageTypeBase):
+    class Meta:
+        interfaces = (Event,)
+
+
+class PageTypeDeleted(ObjectType, PageTypeBase):
+    class Meta:
+        interfaces = (Event,)
+
+
 class ShippingPriceBase(AbstractType):
     shipping_method = graphene.Field(
         "saleor.graphql.shipping.types.ShippingMethodType",
@@ -804,6 +901,21 @@ class ShippingZoneUpdated(ObjectType, ShippingZoneBase):
 
 
 class ShippingZoneDeleted(ObjectType, ShippingZoneBase):
+    class Meta:
+        interfaces = (Event,)
+
+
+class StaffCreated(ObjectType, UserBase):
+    class Meta:
+        interfaces = (Event,)
+
+
+class StaffUpdated(ObjectType, UserBase):
+    class Meta:
+        interfaces = (Event,)
+
+
+class StaffDeleted(ObjectType, UserBase):
     class Meta:
         interfaces = (Event,)
 
@@ -963,10 +1075,16 @@ class Subscription(ObjectType):
 # so all subscription events types need to be added manually to `Schema`.
 
 SUBSCRIPTION_EVENTS_TYPES = [
+    AddressCreated,
+    AddressUpdated,
+    AddressDeleted,
     AppInstalled,
     AppUpdated,
     AppDeleted,
     AppStatusChanged,
+    AttributeCreated,
+    AttributeUpdated,
+    AttributeDeleted,
     CategoryCreated,
     CategoryUpdated,
     CategoryDeleted,
@@ -1019,12 +1137,18 @@ SUBSCRIPTION_EVENTS_TYPES = [
     PageCreated,
     PageUpdated,
     PageDeleted,
+    PageTypeCreated,
+    PageTypeUpdated,
+    PageTypeDeleted,
     ShippingPriceCreated,
     ShippingPriceUpdated,
     ShippingPriceDeleted,
     ShippingZoneCreated,
     ShippingZoneUpdated,
     ShippingZoneDeleted,
+    StaffCreated,
+    StaffUpdated,
+    StaffDeleted,
     TransactionActionRequest,
     TranslationCreated,
     TranslationUpdated,

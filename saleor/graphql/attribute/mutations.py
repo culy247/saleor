@@ -192,6 +192,7 @@ class BaseReorderAttributeValuesMutation(BaseMutation):
 class AttributeValueInput(graphene.InputObjectType):
     value = graphene.String(description=AttributeValueDescriptions.VALUE)
     rich_text = JSONString(description=AttributeValueDescriptions.RICH_TEXT)
+    plain_text = graphene.String(description=AttributeValueDescriptions.PLAIN_TEXT)
     file_url = graphene.String(
         required=False,
         description="URL of the file attribute. Every time, a new value is created.",
@@ -517,9 +518,13 @@ class AttributeCreate(AttributeMixin, ModelMutation):
         # Commit it
         instance.save()
         cls._save_m2m(info, instance, cleaned_input)
-
+        cls.post_save_action(info, instance, cleaned_input)
         # Return the attribute that was created
         return AttributeCreate(attribute=instance)
+
+    @classmethod
+    def post_save_action(cls, info, instance, cleaned_input):
+        info.context.plugins.attribute_created(instance)
 
 
 class AttributeUpdate(AttributeMixin, ModelMutation):
@@ -582,9 +587,14 @@ class AttributeUpdate(AttributeMixin, ModelMutation):
         # Commit it
         instance.save()
         cls._save_m2m(info, instance, cleaned_input)
+        cls.post_save_action(info, instance, cleaned_input)
 
         # Return the attribute that was created
         return AttributeUpdate(attribute=instance)
+
+    @classmethod
+    def post_save_action(cls, info, instance, cleaned_input):
+        info.context.plugins.attribute_updated(instance)
 
 
 class AttributeDelete(ModelDeleteMutation):
@@ -598,6 +608,10 @@ class AttributeDelete(ModelDeleteMutation):
         permissions = (ProductTypePermissions.MANAGE_PRODUCT_TYPES_AND_ATTRIBUTES,)
         error_type_class = AttributeError
         error_type_field = "attribute_errors"
+
+    @classmethod
+    def post_save_action(cls, info, instance, cleaned_input):
+        info.context.plugins.attribute_deleted(instance)
 
 
 def validate_value_is_unique(attribute: models.Attribute, value: models.AttributeValue):
@@ -682,7 +696,12 @@ class AttributeValueCreate(AttributeMixin, ModelMutation):
 
         instance.save()
         cls._save_m2m(info, instance, cleaned_input)
+        cls.post_save_action(info, instance, cleaned_input)
         return AttributeValueCreate(attribute=attribute, attributeValue=instance)
+
+    @classmethod
+    def post_save_action(cls, info, instance, cleaned_input):
+        info.context.plugins.attribute_updated(instance.attribute)
 
 
 class AttributeValueUpdate(AttributeValueCreate):
@@ -726,7 +745,6 @@ class AttributeValueUpdate(AttributeValueCreate):
 
     @classmethod
     def post_save_action(cls, info, instance, cleaned_input):
-        super().post_save_action(info, instance, cleaned_input)
         variants = product_models.ProductVariant.objects.filter(
             Exists(instance.variantassignments.filter(variant_id=OuterRef("id")))
         )
@@ -735,6 +753,7 @@ class AttributeValueUpdate(AttributeValueCreate):
             | Q(Exists(variants.filter(product_id=OuterRef("id"))))
         )
         update_products_search_vector(products)
+        info.context.plugins.attribute_updated(instance.attribute)
 
 
 class AttributeValueDelete(ModelDeleteMutation):
@@ -760,6 +779,7 @@ class AttributeValueDelete(ModelDeleteMutation):
         update_products_search_vector(
             product_models.Product.objects.filter(id__in=product_ids)
         )
+        info.context.plugins.attribute_updated(instance.attribute)
         return response
 
     @classmethod
@@ -844,4 +864,5 @@ class AttributeReorderValues(BaseMutation):
         with traced_atomic_transaction():
             perform_reordering(values_m2m, operations)
         attribute.refresh_from_db(fields=["values"])
+        info.context.plugins.attribute_updated(attribute)
         return AttributeReorderValues(attribute=attribute)

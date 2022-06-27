@@ -29,7 +29,7 @@ from prices import Money, TaxedMoney, fixed_discount
 
 from ..account.models import Address, StaffNotificationRecipient, User
 from ..app.models import App, AppExtension, AppInstallation
-from ..app.types import AppExtensionMount, AppExtensionTarget, AppType
+from ..app.types import AppExtensionMount, AppType
 from ..attribute import AttributeEntityType, AttributeInputType, AttributeType
 from ..attribute.models import (
     Attribute,
@@ -41,7 +41,7 @@ from ..attribute.utils import associate_attribute_values_to_instance
 from ..checkout.fetch import fetch_checkout_info, fetch_checkout_lines
 from ..checkout.models import Checkout, CheckoutLine
 from ..checkout.utils import add_variant_to_checkout, add_voucher_to_checkout
-from ..core import EventDeliveryStatus, JobStatus, TimePeriodType
+from ..core import EventDeliveryStatus, JobStatus
 from ..core.models import EventDelivery, EventDeliveryAttempt, EventPayload
 from ..core.payments import PaymentInterface
 from ..core.units import MeasurementUnits
@@ -76,7 +76,7 @@ from ..order.models import (
     OrderEvent,
     OrderLine,
 )
-from ..order.search import prepare_order_search_document_value
+from ..order.search import prepare_order_search_vector_value
 from ..order.utils import recalculate_order
 from ..page.models import Page, PageTranslation, PageType
 from ..payment import ChargeStatus, TransactionKind
@@ -817,9 +817,9 @@ def order(customer_user, channel_USD):
 
 
 @pytest.fixture
-def order_with_search_document_value(order):
-    order.search_document = prepare_order_search_document_value(order)
-    order.save(update_fields=["search_document"])
+def order_with_search_vector_value(order):
+    order.search_vector = prepare_order_search_vector_value(order)
+    order.save(update_fields=["search_vector"])
     return order
 
 
@@ -1355,6 +1355,48 @@ def rich_text_attribute_with_many_values(rich_text_attribute):
 
 
 @pytest.fixture
+def plain_text_attribute(db):
+    attribute = Attribute.objects.create(
+        slug="plain-text",
+        name="Plain text",
+        type=AttributeType.PRODUCT_TYPE,
+        input_type=AttributeInputType.PLAIN_TEXT,
+        filterable_in_storefront=False,
+        filterable_in_dashboard=False,
+        available_in_grid=False,
+    )
+    text = "Plain text attribute content."
+    AttributeValue.objects.create(
+        attribute=attribute,
+        name=truncatechars(text, 50),
+        slug=f"instance_{attribute.id}",
+        plain_text=text,
+    )
+    return attribute
+
+
+@pytest.fixture
+def plain_text_attribute_page_type(db):
+    attribute = Attribute.objects.create(
+        slug="plain-text",
+        name="Plain text",
+        type=AttributeType.PAGE_TYPE,
+        input_type=AttributeInputType.PLAIN_TEXT,
+        filterable_in_storefront=False,
+        filterable_in_dashboard=False,
+        available_in_grid=False,
+    )
+    text = "Plain text attribute content."
+    AttributeValue.objects.create(
+        attribute=attribute,
+        name=truncatechars(text, 50),
+        slug=f"instance_{attribute.id}",
+        plain_text=text,
+    )
+    return attribute
+
+
+@pytest.fixture
 def color_attribute_without_values(db):  # pylint: disable=W0613
     return Attribute.objects.create(
         slug="color",
@@ -1832,9 +1874,7 @@ def shippable_gift_card_product_type(db):
 
 
 @pytest.fixture
-def product_type_with_rich_text_attribute(
-    rich_text_attribute, color_attribute, size_attribute
-):
+def product_type_with_rich_text_attribute(rich_text_attribute):
     product_type = ProductType.objects.create(
         name="Default Type",
         slug="default-type",
@@ -5175,6 +5215,7 @@ def webhook_app(
     permission_manage_discounts,
     permission_manage_menus,
     permission_manage_products,
+    permission_manage_staff,
 ):
     app = App.objects.create(name="Webhook app", is_active=True)
     app.permissions.add(permission_manage_shipping)
@@ -5182,6 +5223,7 @@ def webhook_app(
     app.permissions.add(permission_manage_discounts)
     app.permissions.add(permission_manage_menus)
     app.permissions.add(permission_manage_products)
+    app.permissions.add(permission_manage_staff)
     return app
 
 
@@ -5643,8 +5685,8 @@ def allocations(order_list, stock, channel_USD):
     )
 
     for order in order_list:
-        order.search_document = prepare_order_search_document_value(order)
-    Order.objects.bulk_update(order_list, ["search_document"])
+        order.search_vector = prepare_order_search_vector_value(order)
+    Order.objects.bulk_update(order_list, ["search_vector"])
 
     return Allocation.objects.bulk_create(
         [

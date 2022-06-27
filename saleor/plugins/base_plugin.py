@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     # flake8: noqa
     from ..account.models import Address, User
     from ..app.models import App
+    from ..attribute.models import Attribute
     from ..channel.models import Channel
     from ..checkout.fetch import CheckoutInfo, CheckoutLineInfo
     from ..checkout.models import Checkout
@@ -42,7 +43,7 @@ if TYPE_CHECKING:
     from ..invoice.models import Invoice
     from ..menu.models import Menu, MenuItem
     from ..order.models import Fulfillment, Order, OrderLine
-    from ..page.models import Page
+    from ..page.models import Page, PageType
     from ..product.models import (
         Category,
         Collection,
@@ -134,6 +135,24 @@ class BasePlugin:
     def __str__(self):
         return self.PLUGIN_NAME
 
+    #  Trigger when address is created.
+    #
+    #  Overwrite this method if you need to trigger specific logic after an address is
+    #  created.
+    address_created: Callable[["Address", None], None]
+
+    #  Trigger when address is deleted.
+    #
+    #  Overwrite this method if you need to trigger specific logic after an address is
+    #  deleted.
+    address_deleted: Callable[["Address", None], None]
+
+    #  Trigger when address is updated.
+    #
+    #  Overwrite this method if you need to trigger specific logic after an address is
+    #  updated.
+    address_updated: Callable[["Address", None], None]
+
     #  Trigger when app is installed.
     #
     #  Overwrite this method if you need to trigger specific logic after an app is
@@ -170,6 +189,24 @@ class BasePlugin:
         [Union["Product", "ProductType"], Union[str, NoneType], Any], Any
     ]
 
+    #  Trigger when attribute is created.
+    #
+    #  Overwrite this method if you need to trigger specific logic after an attribute is
+    #  installed.
+    attribute_created: Callable[["Attribute", None], None]
+
+    #  Trigger when attribute is deleted.
+    #
+    #  Overwrite this method if you need to trigger specific logic after an attribute is
+    #  deleted.
+    attribute_deleted: Callable[["Attribute", None], None]
+
+    #  Trigger when attribute is updated.
+    #
+    #  Overwrite this method if you need to trigger specific logic after an attribute is
+    #  updated.
+    attribute_updated: Callable[["Attribute", None], None]
+
     #  Authenticate user which should be assigned to the request.
     #
     #  Overwrite this method if the plugin handles authentication flow.
@@ -178,6 +215,14 @@ class BasePlugin:
     ]
 
     authorize_payment: Callable[["PaymentData", Any], GatewayResponse]
+
+    #  Update order lines taxes.
+    #
+    #  Overwrite this method if you need to apply specific logic for applying taxes on
+    #  order lines. Return Iterable["OrderLine"].
+    update_taxes_for_order_lines: Callable[
+        ["Order", List["OrderLine"], List["OrderLine"]], List["OrderLine"]
+    ]
 
     #  Calculate checkout line total.
     #
@@ -602,6 +647,24 @@ class BasePlugin:
     #  updated.
     page_updated: Callable[["Page", Any], Any]
 
+    #  Trigger when page type is created.
+    #
+    #  Overwrite this method if you need to trigger specific logic when a page type is
+    #  created.
+    page_type_created: Callable[["PageType", Any], Any]
+
+    #  Trigger when page type is deleted.
+    #
+    #  Overwrite this method if you need to trigger specific logic when a page type is
+    #  deleted.
+    page_type_deleted: Callable[["PageType", Any], Any]
+
+    #  Trigger when page type is updated.
+    #
+    #  Overwrite this method if you need to trigger specific logic when a page type is
+    #  updated.
+    page_type_updated: Callable[["PageType", Any], Any]
+
     #  Trigger directly before order creation.
     #
     #  Overwrite this method if you need to trigger specific logic before an order is
@@ -714,6 +777,24 @@ class BasePlugin:
     #  It is used only by the old storefront. The returned value determines if
     #  storefront should append info to the price about "including/excluding X% VAT".
     show_taxes_on_storefront: Callable[[bool], bool]
+
+    #  Trigger when staff user is created.
+    #
+    #  Overwrite this method if you need to trigger specific logic after a staff user is
+    #  created.
+    staff_created: Callable[["User", Any], Any]
+
+    #  Trigger when staff user is updated.
+    #
+    #  Overwrite this method if you need to trigger specific logic after a staff user is
+    #  updated.
+    staff_updated: Callable[["User", Any], Any]
+
+    #  Trigger when staff user is deleted.
+    #
+    #  Overwrite this method if you need to trigger specific logic after a staff user is
+    #  deleted.
+    staff_deleted: Callable[["User", Any], Any]
 
     #  Trigger when tracking number is updated.
     tracking_number_updated: Callable[["Fulfillment", Any], Any]
