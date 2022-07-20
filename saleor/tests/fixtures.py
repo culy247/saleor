@@ -81,7 +81,7 @@ from ..order.utils import recalculate_order
 from ..page.models import Page, PageTranslation, PageType
 from ..payment import ChargeStatus, TransactionKind
 from ..payment.interface import AddressData, GatewayConfig, GatewayResponse, PaymentData
-from ..payment.models import Payment
+from ..payment.models import Payment, TransactionItem
 from ..plugins.manager import get_plugins_manager
 from ..plugins.models import PluginConfiguration
 from ..plugins.vatlayer.plugin import VatlayerPlugin
@@ -5027,6 +5027,19 @@ def payment_dummy_credit_card(db, order_with_lines):
 
 
 @pytest.fixture
+def transaction_item(order):
+    return TransactionItem.objects.create(
+        status="Captured",
+        type="Credit card",
+        reference="PSP ref",
+        available_actions=["refund"],
+        currency="USD",
+        order_id=order.pk,
+        charged_value=Decimal("10"),
+    )
+
+
+@pytest.fixture
 def digital_content(category, media_root, warehouse, channel_USD) -> DigitalContent:
     product_type = ProductType.objects.create(
         name="Digital Type",
@@ -5373,7 +5386,7 @@ def staff_notification_recipient(db, staff_user):
 
 
 @pytest.fixture
-def warehouse(address, shipping_zone):
+def warehouse(address, shipping_zone, channel_USD):
     warehouse = Warehouse.objects.create(
         address=address,
         name="Example Warehouse",
@@ -5381,12 +5394,13 @@ def warehouse(address, shipping_zone):
         email="test@example.com",
     )
     warehouse.shipping_zones.add(shipping_zone)
+    warehouse.channels.add(channel_USD)
     warehouse.save()
     return warehouse
 
 
 @pytest.fixture
-def warehouse_JPY(address, shipping_zone_JPY):
+def warehouse_JPY(address, shipping_zone_JPY, channel_JPY):
     warehouse = Warehouse.objects.create(
         address=address,
         name="Example Warehouse JPY",
@@ -5394,13 +5408,14 @@ def warehouse_JPY(address, shipping_zone_JPY):
         email="test-jpy@example.com",
     )
     warehouse.shipping_zones.add(shipping_zone_JPY)
+    warehouse.channels.add(channel_JPY)
     warehouse.save()
     return warehouse
 
 
 @pytest.fixture
-def warehouses(address, address_usa):
-    return Warehouse.objects.bulk_create(
+def warehouses(address, address_usa, channel_USD):
+    warehouses = Warehouse.objects.bulk_create(
         [
             Warehouse(
                 address=address.get_copy(),
@@ -5416,10 +5431,13 @@ def warehouses(address, address_usa):
             ),
         ]
     )
+    for warehouse in warehouses:
+        warehouse.channels.add(channel_USD)
+    return warehouses
 
 
 @pytest.fixture()
-def warehouses_for_cc(address, shipping_zones):
+def warehouses_for_cc(address, shipping_zones, channel_USD):
     warehouses = Warehouse.objects.bulk_create(
         [
             Warehouse(
@@ -5453,15 +5471,14 @@ def warehouses_for_cc(address, shipping_zones):
             ),
         ]
     )
-    for warehouse in warehouses:
-        warehouse.shipping_zones.add(shipping_zones[0])
-        warehouse.shipping_zones.add(shipping_zones[1])
-        warehouse.save()
+    for shipping_zone in shipping_zones:
+        shipping_zone.warehouses.add(*warehouses)
+    channel_USD.warehouses.add(*warehouses)
     return warehouses
 
 
 @pytest.fixture
-def warehouse_for_cc(address, product_variant_list, shipping_zones):
+def warehouse_for_cc(address, product_variant_list, shipping_zones, channel_USD):
     warehouse = Warehouse.objects.create(
         address=address.get_copy(),
         name="Local Warehouse",
@@ -5470,8 +5487,8 @@ def warehouse_for_cc(address, product_variant_list, shipping_zones):
         is_private=False,
         click_and_collect_option=WarehouseClickAndCollectOption.LOCAL_STOCK,
     )
-    warehouse.shipping_zones.add(shipping_zones[0])
-    warehouse.shipping_zones.add(shipping_zones[1])
+    warehouse.shipping_zones.add(shipping_zones[0], shipping_zones[1])
+    warehouse.channels.add(channel_USD)
 
     Stock.objects.bulk_create(
         [
@@ -5605,13 +5622,14 @@ def warehouses_with_different_shipping_zone(warehouses, shipping_zones):
 
 
 @pytest.fixture
-def warehouse_no_shipping_zone(address):
+def warehouse_no_shipping_zone(address, channel_USD):
     warehouse = Warehouse.objects.create(
         address=address,
         name="Warehouse without shipping zone",
         slug="warehouse-no-shipping-zone",
         email="test2@example.com",
     )
+    warehouse.channels.add(channel_USD)
     return warehouse
 
 
@@ -5823,6 +5841,46 @@ def app_manifest():
         "appUrl": "",
         "configurationUrl": "http://127.0.0.1:5000/configuration/",
         "tokenTargetUrl": "http://127.0.0.1:5000/configuration/install",
+    }
+
+
+@pytest.fixture
+def app_manifest_webhook():
+    return {
+        "name": "webhook",
+        "asyncEvents": [
+            "ORDER_CREATED",
+            "ORDER_FULLY_PAID",
+            "CUSTOMER_CREATED",
+            "FULFILLMENT_CREATED",
+        ],
+        "query": """
+            subscription {
+                event {
+                    ... on OrderCreated {
+                        order {
+                            id
+                        }
+                    }
+                    ... on OrderFullyPaid {
+                        order {
+                            id
+                        }
+                    }
+                    ... on CustomerCreated {
+                        user {
+                            id
+                        }
+                    }
+                    ... on FulfillmentCreated {
+                        fulfillment {
+                            id
+                        }
+                    }
+                }
+            }
+        """,
+        "targetUrl": "https://app.example/api/webhook",
     }
 
 

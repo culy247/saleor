@@ -2,25 +2,81 @@
 
 All notable, unreleased changes to this project will be documented in this file. For the released changes, please visit the [Releases](https://github.com/mirumee/saleor/releases) page.
 
-# 3.5.0 [Unreleased]
+# 3.6.0 [Unreleased]
+
+### Saleor Apps
+
+- Add support for the CUSTOMER_* app mount points (#10163) by @krzysztofwolski
+
+### Breaking changes
+- Drop django-versatileimagefield package; add a proxy view to generate thumbnails on-demand - #9988 by @IKarbowiak
+  - Drop `create_thumbnails` command
 
 ### Other changes
-- Fix inaccurate tax calculations - #9799 by @IKarbowiak
-- Fix incorrect default value used in `PaymentInput.storePaymentMethod` - #9943 by @korycins
-- Introduce plain text attribute - #9907 by @IKarbowiak
-- Stop auto-assigning default addresses to checkout - #9933 by @SzymJ
-- Added `OrderFilter.numbers` filter  - #9967 by @SzymJ
-- Added `metadata` fields to `OrderLine` and `CheckoutLine` models - #10040 by @SzymJ
-- Improve checkout total base calculations - #10048 by @IKarbowiak
+- Add `VoucherFilter.ids` filter - #10157 by @Jakubkuc
+- Allow values of different attributes to share the same slug - #10138 by @IKarbowiak
+- Add query for transaction item and extend transaction item type with order - #10154 by @IKarbowiak
+- Fix inconsistent beat scheduling and compatibility with db scheduler - #10185 by @NyanKiyoshi<br/>
+  This fixes the following bugs:
+  - `tick()` could decide to never schedule anything else than `send-sale-toggle-notifications` if `send-sale-toggle-notifications` doesn't return `is_due = False` (stuck forever until beat restart or a `is_due = True`)
+  - `tick()` was sometimes scheduling other schedulers such as observability to be ran every 5m instead of every 20s
+  - `is_due()` from `send-sale-toggle-notifications` was being invoked every 5s on django-celery-beat instead of every 60s
+  - `send-sale-toggle-notifications` would crash on django-celery-beat with `Cannot convert schedule type <saleor.core.schedules.sale_webhook_schedule object at 0x7fabfdaacb20> to model`
 
-#### Saleor Apps
+  Usage:
+  - Database backend: `celery --app saleor.celeryconf:app beat --scheduler saleor.schedulers.schedulers.DatabaseScheduler`
+  - Shelve backend: `celery --app saleor.celeryconf:app beat --scheduler saleor.schedulers.schedulers.PersistentScheduler`
+
+
+# 3.5.0
+
+### GraphQL API
+
+- Allow skipping address validation for checkout mutations (#10084) (7de33b145)
+- Add `OrderFilter.numbers` filter - #9967 by @SzymJ
+- Expose manifest in the `App` type (#10055) (f0f944066)
+- Deprecate `configurationUrl` and `dataPrivacy` fields in apps (#10046) (68bd7c8a2)
+- Fix `ProductVariant.created` resolver (#10072) (6c77053a9)
+
+### Saleor Apps
+
 - Add webhooks `PAGE_TYPE_CREATED`, `PAGE_TYPE_UPDATED` and `PAGE_TYPE_DELETED` - #9859 by @SzymJ
 - Add webhooks `ADDRESS_CREATED`, `ADDRESS_UPDATED` and `ADDRESS_DELETED` - #9860 by @SzymJ
 - Add webhooks `STAFF_CREATED`, `STAFF_UPDATED` and `STAFF_DELETED` - #9949 by @SzymJ
 - Add webhooks `ATTRIBUTE_CREATED`, `ATTRIBUTE_UPDATED` and `ATTRIBUTE_DELETED` - #9991 by @SzymJ
 - Add webhooks `ATTRIBUTE_VALUE_CREATED`, `ATTRIBUTE_VALUE_UPDATED` and `ATTRIBUTE_VALUE_DELETED` - #10035 by @SzymJ
 - Add webhook `CUSTOMER_DELETED` - #10060 by @SzymJ
+- Add webhook for starting and ending sales - #10110 by @IKarbowiak
 - Fix returning errors in subscription webhooks payloads - #9905 by @SzymJ
+- Build JWT signature when secret key is an empty string (#10139) (c47de896c)
+- Use JWS to sign webhooks with secretKey instead of obscure signature (ac065cdce)
+- Sign webhook payload using RS256 and private key used JWT infrastructure (#9977) (df7c7d4e8)
+- Unquote secret access when calling SQS (#10076) (3ac9714b5)
+
+### Performance
+
+- Add payment transactions data loader (#9940) (799a9f1c9)
+- Optimize 0139_fulfil_orderline_token_old_id_created_at migration (#9935) (63073a86b)
+
+### Other changes
+
+- Introduce plain text attribute - #9907 by @IKarbowiak
+- Add `metadata` fields to `OrderLine` and `CheckoutLine` models - #10040 by @SzymJ
+- Add full-text search for Orders (#9937) (61aa89f06)
+- Stop auto-assigning default addresses to checkout - #9933 by @SzymJ
+- Fix inaccurate tax calculations - #9799 by @IKarbowiak
+- Fix incorrect default value used in `PaymentInput.storePaymentMethod` - #9943 by @korycins
+- Improve checkout total base calculations - #10048 by @IKarbowiak
+- Improve click & collect and stock allocation - #10043 by @IKarbowiak
+- Fix product media reordering (#10118) (de8a1847f)
+- Add custom SearchVector class (#10109) (bf74f5efb)
+- Improve checkout total base calculations (527b67f9b)
+- Fix invoice download URL in send-invoice email (#10014) (667837a09)
+- Fix invalid undiscounted total on order line (22ccacb59)
+- Fix Avalara for free shipping (#9973) (90c076e33)
+- Fix Avalara when voucher with `apply_once_per_order` settings is used (#9959) (fad5cdf46)
+- Use Saleor's custom UvicornWorker to avoid lifespan warnings (#9915) (9090814b9)
+- Add Azure blob storage support (#9866) (ceee97e83)
 
 # 3.4.0
 

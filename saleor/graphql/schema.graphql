@@ -450,6 +450,20 @@ type Query {
     last: Int
   ): PaymentCountableConnection
 
+  """
+  Look up a transaction by ID.
+  
+  Added in Saleor 3.6.
+  
+  Note: this API is currently in Feature Preview and can be subject to changes at later point.
+  
+  Requires one of the following permissions: HANDLE_PAYMENTS.
+  """
+  transaction(
+    """ID of a transaction."""
+    id: ID!
+  ): TransactionItem
+
   """Look up a page by ID or slug."""
   page(
     """ID of the page."""
@@ -1448,6 +1462,7 @@ enum WebhookEventTypeEnum {
   SALE_CREATED
   SALE_UPDATED
   SALE_DELETED
+  SALE_TOGGLE
 
   """An invoice for order requested."""
   INVOICE_REQUESTED
@@ -1743,6 +1758,7 @@ enum WebhookEventTypeAsyncEnum {
   SALE_CREATED
   SALE_UPDATED
   SALE_DELETED
+  SALE_TOGGLE
 
   """An invoice for order requested."""
   INVOICE_REQUESTED
@@ -2157,6 +2173,9 @@ type AppExtension implements Node {
 
 """All places where app extension can be mounted."""
 enum AppExtensionMountEnum {
+  CUSTOMER_OVERVIEW_CREATE
+  CUSTOMER_OVERVIEW_MORE_ACTIONS
+  CUSTOMER_DETAILS_MORE_ACTIONS
   PRODUCT_OVERVIEW_CREATE
   PRODUCT_OVERVIEW_MORE_ACTIONS
   PRODUCT_DETAILS_MORE_ACTIONS
@@ -2386,6 +2405,7 @@ enum WebhookSampleEventTypeEnum {
   SALE_CREATED
   SALE_UPDATED
   SALE_DELETED
+  SALE_TOGGLE
   INVOICE_REQUESTED
   INVOICE_DELETED
   INVOICE_SENT
@@ -3653,6 +3673,15 @@ type Channel implements Node {
   Added in Saleor 3.1.
   """
   defaultCountry: CountryDisplay!
+
+  """
+  List of warehouses assigned to this channel.
+  
+  Added in Saleor 3.5.
+  
+  Note: this API is currently in Feature Preview and can be subject to changes at later point.
+  """
+  warehouses: [Warehouse!]!
 }
 
 """Represents shipping method postal code rule."""
@@ -3773,11 +3802,20 @@ type Product implements Node & ObjectWithMetadata {
   Rich text format. For reference see https://editorjs.io/
   """
   descriptionJson: JSONString @deprecated(reason: "This field will be removed in Saleor 4.0. Use the `description` field instead.")
-
-  """The main thumbnail for a product."""
   thumbnail(
-    """Size of thumbnail."""
+    """
+    Size of the image. If not provided, the original image will be returned.
+    """
     size: Int
+
+    """
+    The format of the image. When not provided, format of the original image will be used. Must be provided together with the size value, otherwise original image will be returned.
+    
+    Added in Saleor 3.6.
+    
+    Note: this API is currently in Feature Preview and can be subject to changes at later point.
+    """
+    format: ThumbnailFormatEnum
   ): Image
 
   """
@@ -4567,8 +4605,19 @@ type Category implements Node & ObjectWithMetadata {
     last: Int
   ): CategoryCountableConnection
   backgroundImage(
-    """Size of the image."""
+    """
+    Size of the image. If not provided, the original image will be returned.
+    """
     size: Int
+
+    """
+    The format of the image. When not provided, format of the original image will be used. Must be provided together with the size value, otherwise original image will be returned.
+    
+    Added in Saleor 3.6.
+    
+    Note: this API is currently in Feature Preview and can be subject to changes at later point.
+    """
+    format: ThumbnailFormatEnum
   ): Image
 
   """Returns translated category fields for the given language code."""
@@ -4602,6 +4651,11 @@ type Image {
 
   """Alt text for an image."""
   alt: String
+}
+
+"""An enumeration."""
+enum ThumbnailFormatEnum {
+  WEBP
 }
 
 type CategoryTranslation implements Node {
@@ -5184,11 +5238,20 @@ type ProductImage {
   The new relative sorting position of the item (from -inf to +inf). 1 moves the item one position forward, -1 moves the item one position backward, 0 leaves the item unchanged.
   """
   sortOrder: Int
-
-  """The URL of the image."""
   url(
-    """Size of the image."""
+    """
+    Size of the image. If not provided, the original image will be returned.
+    """
     size: Int
+
+    """
+    The format of the image. When not provided, format of the original image will be used. Must be provided together with the size value, otherwise original image will be returned.
+    
+    Added in Saleor 3.6.
+    
+    Note: this API is currently in Feature Preview and can be subject to changes at later point.
+    """
+    format: ThumbnailFormatEnum
   ): String!
 }
 
@@ -5199,11 +5262,20 @@ type ProductMedia implements Node {
   alt: String!
   type: ProductMediaType!
   oembedData: JSONString!
-
-  """The URL of the media."""
   url(
-    """Size of the image."""
+    """
+    Size of the image. If not provided, the original image will be returned.
+    """
     size: Int
+
+    """
+    The format of the image. When not provided, format of the original image will be used. Must be provided together with the size value, otherwise original image will be returned.
+    
+    Added in Saleor 3.6.
+    
+    Note: this API is currently in Feature Preview and can be subject to changes at later point.
+    """
+    format: ThumbnailFormatEnum
   ): String!
 }
 
@@ -5530,8 +5602,19 @@ type Collection implements Node & ObjectWithMetadata {
     last: Int
   ): ProductCountableConnection
   backgroundImage(
-    """Size of the image."""
+    """
+    Size of the image. If not provided, the original image will be returned.
+    """
     size: Int
+
+    """
+    The format of the image. When not provided, format of the original image will be used. Must be provided together with the size value, otherwise original image will be returned.
+    
+    Added in Saleor 3.6.
+    
+    Note: this API is currently in Feature Preview and can be subject to changes at later point.
+    """
+    format: ThumbnailFormatEnum
   ): Image
 
   """Returns translated collection fields for the given language code."""
@@ -5811,6 +5894,7 @@ input WarehouseFilterInput {
   search: String
   ids: [ID!]
   isPrivate: Boolean
+  channels: [ID!]
 }
 
 input WarehouseSortingInput {
@@ -7389,8 +7473,19 @@ type User implements Node & ObjectWithMetadata {
   """List of user's permission groups which user can manage."""
   editableGroups: [Group!]
   avatar(
-    """Size of the avatar."""
+    """
+    Size of the image. If not provided, the original image will be returned.
+    """
     size: Int
+
+    """
+    The format of the image. When not provided, format of the original image will be used. Must be provided together with the size value, otherwise original image will be returned.
+    
+    Added in Saleor 3.6.
+    
+    Note: this API is currently in Feature Preview and can be subject to changes at later point.
+    """
+    format: ThumbnailFormatEnum
   ): Image
 
   """
@@ -7991,6 +8086,13 @@ type TransactionItem implements Node & ObjectWithMetadata {
   """Reference of transaction."""
   reference: String!
 
+  """
+  The related order.
+  
+  Added in Saleor 3.6.
+  """
+  order: Order
+
   """List of all transaction's events."""
   events: [TransactionEvent!]!
 }
@@ -8007,63 +8109,6 @@ enum TransactionActionEnum {
   CHARGE
   REFUND
   VOID
-}
-
-"""Represents transaction's event."""
-type TransactionEvent implements Node {
-  """The ID of the object."""
-  id: ID!
-  createdAt: DateTime!
-
-  """Status of transaction's event."""
-  status: TransactionStatus!
-
-  """Reference of transaction's event."""
-  reference: String!
-
-  """Name of the transaction's event."""
-  name: String
-}
-
-"""An enumeration."""
-enum TransactionStatus {
-  PENDING
-  SUCCESS
-  FAILURE
-}
-
-type GiftCardCountableConnection {
-  """Pagination data for this connection."""
-  pageInfo: PageInfo!
-  edges: [GiftCardCountableEdge!]!
-
-  """A total count of items in the collection."""
-  totalCount: Int
-}
-
-type GiftCardCountableEdge {
-  """The item at the end of the edge."""
-  node: GiftCard!
-
-  """A cursor for use in pagination."""
-  cursor: String!
-}
-
-type OrderCountableConnection {
-  """Pagination data for this connection."""
-  pageInfo: PageInfo!
-  edges: [OrderCountableEdge!]!
-
-  """A total count of items in the collection."""
-  totalCount: Int
-}
-
-type OrderCountableEdge {
-  """The item at the end of the edge."""
-  node: Order!
-
-  """A cursor for use in pagination."""
-  cursor: String!
 }
 
 """Represents an order in the shop."""
@@ -8456,11 +8501,20 @@ type OrderLine implements Node & ObjectWithMetadata {
   unitDiscountReason: String
   taxRate: Float!
   digitalContentUrl: DigitalContentUrl
-
-  """The main thumbnail for the ordered product."""
   thumbnail(
-    """Size of thumbnail."""
+    """
+    Size of the image. If not provided, the original image will be returned.
+    """
     size: Int
+
+    """
+    The format of the image. When not provided, format of the original image will be used. Must be provided together with the size value, otherwise original image will be returned.
+    
+    Added in Saleor 3.6.
+    
+    Note: this API is currently in Feature Preview and can be subject to changes at later point.
+    """
+    format: ThumbnailFormatEnum
   ): Image
 
   """Price of the single item in the order line."""
@@ -9025,6 +9079,13 @@ type OrderEventDiscountObject {
   oldAmount: Money
 }
 
+"""An enumeration."""
+enum TransactionStatus {
+  PENDING
+  SUCCESS
+  FAILURE
+}
+
 """Contains all details related to the applied discount to the order."""
 type OrderDiscount implements Node {
   id: ID!
@@ -9122,6 +9183,56 @@ enum AddressTypeEnum {
   SHIPPING
 }
 
+"""Represents transaction's event."""
+type TransactionEvent implements Node {
+  """The ID of the object."""
+  id: ID!
+  createdAt: DateTime!
+
+  """Status of transaction's event."""
+  status: TransactionStatus!
+
+  """Reference of transaction's event."""
+  reference: String!
+
+  """Name of the transaction's event."""
+  name: String
+}
+
+type GiftCardCountableConnection {
+  """Pagination data for this connection."""
+  pageInfo: PageInfo!
+  edges: [GiftCardCountableEdge!]!
+
+  """A total count of items in the collection."""
+  totalCount: Int
+}
+
+type GiftCardCountableEdge {
+  """The item at the end of the edge."""
+  node: GiftCard!
+
+  """A cursor for use in pagination."""
+  cursor: String!
+}
+
+type OrderCountableConnection {
+  """Pagination data for this connection."""
+  pageInfo: PageInfo!
+  edges: [OrderCountableEdge!]!
+
+  """A total count of items in the collection."""
+  totalCount: Int
+}
+
+type OrderCountableEdge {
+  """The item at the end of the edge."""
+  node: Order!
+
+  """A cursor for use in pagination."""
+  cursor: String!
+}
+
 type UserPermission {
   """Internal code for permission."""
   code: PermissionEnum!
@@ -9189,6 +9300,8 @@ type CustomerEvent implements Node {
 """An enumeration."""
 enum CustomerEventsEnum {
   ACCOUNT_CREATED
+  ACCOUNT_ACTIVATED
+  ACCOUNT_DEACTIVATED
   PASSWORD_RESET_LINK_SENT
   PASSWORD_RESET
   EMAIL_CHANGED_REQUEST
@@ -10001,6 +10114,7 @@ input VoucherFilterInput {
   started: DateTimeRangeInput
   search: String
   metadata: [MetadataFilter!]
+  ids: [ID!]
 }
 
 enum VoucherDiscountType {
@@ -12809,6 +12923,15 @@ type Mutation {
     DEPRECATED: this field will be removed in Saleor 4.0. Use `id` instead.
     """
     token: UUID
+
+    """
+    The rules for changing validation for received billing address data.
+    
+    Added in Saleor 3.5.
+    
+    Note: this API is currently in Feature Preview and can be subject to changes at later point.
+    """
+    validationRules: CheckoutAddressValidationRules
   ): CheckoutBillingAddressUpdate
 
   """
@@ -13135,6 +13258,15 @@ type Mutation {
     DEPRECATED: this field will be removed in Saleor 4.0. Use `id` instead.
     """
     token: UUID
+
+    """
+    The rules for changing validation for received shipping address data.
+    
+    Added in Saleor 3.5.
+    
+    Note: this API is currently in Feature Preview and can be subject to changes at later point.
+    """
+    validationRules: CheckoutAddressValidationRules
   ): CheckoutShippingAddressUpdate
 
   """Updates the shipping method of the checkout."""
@@ -13889,7 +14021,7 @@ type Mutation {
   ): CustomerBulkDelete
 
   """
-  Creates a new staff user. 
+  Creates a new staff user. Apps are not allowed to perform this mutation. 
   
   Requires one of the following permissions: MANAGE_STAFF.
   """
@@ -13899,7 +14031,7 @@ type Mutation {
   ): StaffCreate
 
   """
-  Updates an existing staff user. 
+  Updates an existing staff user. Apps are not allowed to perform this mutation. 
   
   Requires one of the following permissions: MANAGE_STAFF.
   """
@@ -13912,7 +14044,7 @@ type Mutation {
   ): StaffUpdate
 
   """
-  Deletes a staff user. 
+  Deletes a staff user. Apps are not allowed to perform this mutation. 
   
   Requires one of the following permissions: MANAGE_STAFF.
   """
@@ -13922,7 +14054,7 @@ type Mutation {
   ): StaffDelete
 
   """
-  Deletes staff users. 
+  Deletes staff users. Apps are not allowed to perform this mutation. 
   
   Requires one of the following permissions: MANAGE_STAFF.
   """
@@ -13962,7 +14094,7 @@ type Mutation {
   ): UserBulkSetActive
 
   """
-  Create new permission group. 
+  Create new permission group. Apps are not allowed to perform this mutation. 
   
   Requires one of the following permissions: MANAGE_STAFF.
   """
@@ -13972,7 +14104,7 @@ type Mutation {
   ): PermissionGroupCreate
 
   """
-  Update permission group. 
+  Update permission group. Apps are not allowed to perform this mutation. 
   
   Requires one of the following permissions: MANAGE_STAFF.
   """
@@ -13985,7 +14117,7 @@ type Mutation {
   ): PermissionGroupUpdate
 
   """
-  Delete permission group. 
+  Delete permission group. Apps are not allowed to perform this mutation. 
   
   Requires one of the following permissions: MANAGE_STAFF.
   """
@@ -19054,6 +19186,23 @@ type CheckoutBillingAddressUpdate {
   errors: [CheckoutError!]!
 }
 
+input CheckoutAddressValidationRules {
+  """
+  Determines if an error should be raised when the provided address doesn't have all the required fields. The list of required fields is dynamic and depends on the country code (use the `addressValidationRules` query to fetch them). Note: country code is mandatory for all addresses regardless of the rules provided in this input.
+  """
+  checkRequiredFields: Boolean = true
+
+  """
+  Determines if an error should be raised when the provided address doesn't match the expected format. Example: using letters for postal code when the numbers are expected.
+  """
+  checkFieldsFormat: Boolean = true
+
+  """
+  Determines if Saleor should apply normalization on address fields. Example: converting city field to uppercase letters.
+  """
+  enableFieldsNormalization: Boolean = true
+}
+
 """
 Completes the checkout. As a result a new order is created and a payment charge is made. This action requires a successful payment before it can be performed. In case additional confirmation step as 3D secure is required confirmationNeeded flag will be set to True and no order created until payment is confirmed with second call of this mutation.
 """
@@ -19105,6 +19254,15 @@ input CheckoutCreateInput {
 
   """Checkout language code."""
   languageCode: LanguageCodeEnum
+
+  """
+  The checkout validation rules that can be changed.
+  
+  Added in Saleor 3.5.
+  
+  Note: this API is currently in Feature Preview and can be subject to changes at later point.
+  """
+  validationRules: CheckoutValidationRules
 }
 
 input CheckoutLineInput {
@@ -19122,6 +19280,18 @@ input CheckoutLineInput {
   Note: this API is currently in Feature Preview and can be subject to changes at later point.
   """
   price: PositiveDecimal
+}
+
+input CheckoutValidationRules {
+  """
+  The validation rules that can be applied to provided shipping address data.
+  """
+  shippingAddress: CheckoutAddressValidationRules
+
+  """
+  The validation rules that can be applied to provided billing address data.
+  """
+  billingAddress: CheckoutAddressValidationRules
 }
 
 """
@@ -19389,6 +19559,9 @@ type ChannelError {
 
   """List of shipping zone IDs which causes the error."""
   shippingZones: [ID!]
+
+  """List of warehouses IDs which causes the error."""
+  warehouses: [ID!]
 }
 
 """An enumeration."""
@@ -19408,6 +19581,18 @@ input ChannelCreateInput {
   """isActive flag."""
   isActive: Boolean
 
+  """List of shipping zones to assign to the channel."""
+  addShippingZones: [ID!]
+
+  """
+  List of warehouses to assign to the channel.
+  
+  Added in Saleor 3.5.
+  
+  Note: this API is currently in Feature Preview and can be subject to changes at later point.
+  """
+  addWarehouses: [ID!]
+
   """Name of the channel."""
   name: String!
 
@@ -19421,11 +19606,10 @@ input ChannelCreateInput {
   Default country for the channel. Default country can be used in checkout to determine the stock quantities or calculate taxes when the country was not explicitly provided.
   
   Added in Saleor 3.1.
+  
+  Note: this API is currently in Feature Preview and can be subject to changes at later point.
   """
   defaultCountry: CountryCode!
-
-  """List of shipping zones to assign to the channel."""
-  addShippingZones: [ID!]
 }
 
 """
@@ -19443,6 +19627,18 @@ input ChannelUpdateInput {
   """isActive flag."""
   isActive: Boolean
 
+  """List of shipping zones to assign to the channel."""
+  addShippingZones: [ID!]
+
+  """
+  List of warehouses to assign to the channel.
+  
+  Added in Saleor 3.5.
+  
+  Note: this API is currently in Feature Preview and can be subject to changes at later point.
+  """
+  addWarehouses: [ID!]
+
   """Name of the channel."""
   name: String
 
@@ -19456,11 +19652,17 @@ input ChannelUpdateInput {
   """
   defaultCountry: CountryCode
 
-  """List of shipping zones to assign to the channel."""
-  addShippingZones: [ID!]
-
   """List of shipping zones to unassign from the channel."""
   removeShippingZones: [ID!]
+
+  """
+  List of warehouses to unassign from the channel.
+  
+  Added in Saleor 3.5.
+  
+  Note: this API is currently in Feature Preview and can be subject to changes at later point.
+  """
+  removeWarehouses: [ID!]
 }
 
 """
@@ -19997,6 +20199,15 @@ type Manifest {
   homepageUrl: String
   supportUrl: String
   extensions: [AppManifestExtension!]!
+
+  """
+  List of the app's webhooks.
+  
+  Added in Saleor 3.5.
+  
+  Note: this API is currently in Feature Preview and can be subject to changes at later point.
+  """
+  webhooks: [AppManifestWebhook!]!
 }
 
 type AppManifestExtension {
@@ -20014,6 +20225,23 @@ type AppManifestExtension {
 
   """Type of way how app extension will be opened."""
   target: AppExtensionTargetEnum!
+}
+
+type AppManifestWebhook {
+  """The name of the webhook."""
+  name: String!
+
+  """The asynchronous events that webhook wants to subscribe."""
+  asyncEvents: [WebhookEventTypeAsyncEnum!]
+
+  """The synchronous events that webhook wants to subscribe."""
+  syncEvents: [WebhookEventTypeSyncEnum!]
+
+  """Subscription query of a webhook"""
+  query: String!
+
+  """The url to receive the payload."""
+  targetUrl: String!
 }
 
 """
@@ -20577,7 +20805,7 @@ type CustomerBulkDelete {
 }
 
 """
-Creates a new staff user. 
+Creates a new staff user. Apps are not allowed to perform this mutation. 
 
 Requires one of the following permissions: MANAGE_STAFF.
 """
@@ -20638,7 +20866,7 @@ input StaffCreateInput {
 }
 
 """
-Updates an existing staff user. 
+Updates an existing staff user. Apps are not allowed to perform this mutation. 
 
 Requires one of the following permissions: MANAGE_STAFF.
 """
@@ -20672,7 +20900,7 @@ input StaffUpdateInput {
 }
 
 """
-Deletes a staff user. 
+Deletes a staff user. Apps are not allowed to perform this mutation. 
 
 Requires one of the following permissions: MANAGE_STAFF.
 """
@@ -20683,7 +20911,7 @@ type StaffDelete {
 }
 
 """
-Deletes staff users. 
+Deletes staff users. Apps are not allowed to perform this mutation. 
 
 Requires one of the following permissions: MANAGE_STAFF.
 """
@@ -20731,7 +20959,7 @@ type UserBulkSetActive {
 }
 
 """
-Create new permission group. 
+Create new permission group. Apps are not allowed to perform this mutation. 
 
 Requires one of the following permissions: MANAGE_STAFF.
 """
@@ -20784,7 +21012,7 @@ input PermissionGroupCreateInput {
 }
 
 """
-Update permission group. 
+Update permission group. Apps are not allowed to perform this mutation. 
 
 Requires one of the following permissions: MANAGE_STAFF.
 """
@@ -20812,7 +21040,7 @@ input PermissionGroupUpdateInput {
 }
 
 """
-Delete permission group. 
+Delete permission group. Apps are not allowed to perform this mutation. 
 
 Requires one of the following permissions: MANAGE_STAFF.
 """
@@ -22123,6 +22351,39 @@ type SaleDeleted implements Event {
   The sale the event relates to.
   
   Added in Saleor 3.2.
+  
+  Note: this API is currently in Feature Preview and can be subject to changes at later point.
+  """
+  sale(
+    """Slug of a channel for which the data should be returned."""
+    channel: String
+  ): Sale
+}
+
+"""
+The event informs about the start or end of the sale.
+
+Added in Saleor 3.5.
+
+Note: this API is currently in Feature Preview and can be subject to changes at later point.
+"""
+type SaleToggle implements Event {
+  """Time of the event."""
+  issuedAt: DateTime
+
+  """Saleor version that triggered the event."""
+  version: String
+
+  """The user or application that triggered the event."""
+  issuingPrincipal: IssuingPrincipal
+
+  """The application receiving the webhook."""
+  recipient: App
+
+  """
+  The sale the event relates to.
+  
+  Added in Saleor 3.5.
   
   Note: this API is currently in Feature Preview and can be subject to changes at later point.
   """

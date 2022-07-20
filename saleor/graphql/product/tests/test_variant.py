@@ -20,6 +20,7 @@ from ....order import OrderEvents, OrderStatus
 from ....order.models import OrderEvent, OrderLine
 from ....product.error_codes import ProductErrorCode
 from ....product.models import Product, ProductChannelListing, ProductVariant
+from ....tests.consts import TEST_SERVER_DOMAIN
 from ....tests.utils import dummy_editorjs, flush_post_commit_hooks
 from ....warehouse.error_codes import StockErrorCode
 from ....warehouse.models import Allocation, Stock, Warehouse
@@ -30,16 +31,7 @@ from ...tests.utils import (
     get_graphql_content_from_response,
 )
 
-
-def test_fetch_variant(
-    staff_api_client,
-    product,
-    permission_manage_products,
-    site_settings,
-    channel_USD,
-):
-    query = """
-    query ProductVariantDetails(
+QUERY_VARIANT = """query ProductVariantDetails(
         $id: ID!, $address: AddressInput, $countryCode: CountryCode, $channel: String
     ) {
         productVariant(id: $id, channel: $channel) {
@@ -98,8 +90,18 @@ def test_fetch_variant(
             created
         }
     }
-    """
+"""
+
+
+def test_fetch_variant(
+    staff_api_client,
+    product,
+    permission_manage_products,
+    site_settings,
+    channel_USD,
+):
     # given
+    query = QUERY_VARIANT
     variant = product.variants.first()
     variant.weight = Weight(kg=10)
     variant.save(update_fields=["weight"])
@@ -123,6 +125,56 @@ def test_fetch_variant(
     stocks_count = variant.stocks.count()
     assert len(data["deprecatedStocksByCountry"]) == stocks_count
     assert len(data["stocksByAddress"]) == stocks_count
+
+    assert data["weight"]["value"] == 10000
+    assert data["weight"]["unit"] == WeightUnitsEnum.G.name
+    channel_listing_data = data["channelListings"][0]
+    channel_listing = variant.channel_listings.get()
+    assert channel_listing_data["channel"]["slug"] == channel_listing.channel.slug
+    assert channel_listing_data["price"]["currency"] == channel_listing.currency
+    assert channel_listing_data["price"]["amount"] == channel_listing.price_amount
+    assert channel_listing_data["costPrice"]["currency"] == channel_listing.currency
+    assert (
+        channel_listing_data["costPrice"]["amount"] == channel_listing.cost_price_amount
+    )
+
+
+def test_fetch_variant_no_stocks(
+    staff_api_client,
+    product,
+    permission_manage_products,
+    site_settings,
+    channel_USD,
+):
+    # given
+    query = QUERY_VARIANT
+    variant = product.variants.first()
+    variant.weight = Weight(kg=10)
+    variant.save(update_fields=["weight"])
+
+    site_settings.default_weight_unit = WeightUnits.G
+    site_settings.save(update_fields=["default_weight_unit"])
+
+    warehouse = variant.stocks.first().warehouse
+    # remove the warehouse channels
+    # the stocks for this warehouse shouldn't be returned
+    warehouse.channels.clear()
+
+    variant_id = graphene.Node.to_global_id("ProductVariant", variant.pk)
+    variables = {"id": variant_id, "countryCode": "EU", "channel": channel_USD.slug}
+    staff_api_client.user.user_permissions.add(permission_manage_products)
+
+    # when
+    response = staff_api_client.post_graphql(query, variables)
+
+    # then
+    content = get_graphql_content(response)
+    data = content["data"]["productVariant"]
+    assert data["name"] == variant.name
+    assert data["created"] == variant.created_at.isoformat()
+
+    assert not data["deprecatedStocksByCountry"]
+    assert not data["stocksByAddress"]
 
     assert data["weight"]["value"] == 10000
     assert data["weight"]["unit"] == WeightUnitsEnum.G.name
@@ -3084,7 +3136,7 @@ def test_update_product_variant_with_file_attribute_new_value_is_not_created(
     assert value_data["name"] == existing_value.name
     assert (
         value_data["file"]["url"]
-        == f"http://testserver/media/{existing_value.file_url}"
+        == f"http://{TEST_SERVER_DOMAIN}/media/{existing_value.file_url}"
     )
     assert value_data["file"]["contentType"] == existing_value.content_type
 
@@ -3573,13 +3625,13 @@ def test_delete_variant_remove_checkout_lines(
         line.refresh_from_db()
 
 
-@patch("saleor.product.signals.delete_versatile_image")
+@patch("saleor.product.signals.delete_from_storage_task.delay")
 @patch("saleor.plugins.manager.PluginsManager.product_variant_deleted")
 @patch("saleor.order.tasks.recalculate_orders_task.delay")
 def test_delete_variant_with_image(
     mocked_recalculate_orders_task,
     product_variant_deleted_webhook_mock,
-    delete_versatile_image_mock,
+    delete_from_storage_task_mock,
     staff_api_client,
     variant_with_image,
     permission_manage_products,
@@ -3604,7 +3656,7 @@ def test_delete_variant_with_image(
     with pytest.raises(variant._meta.model.DoesNotExist):
         variant.refresh_from_db()
     mocked_recalculate_orders_task.assert_not_called()
-    delete_versatile_image_mock.assert_not_called()
+    delete_from_storage_task_mock.assert_not_called()
 
 
 @patch("saleor.order.tasks.recalculate_orders_task.delay")
