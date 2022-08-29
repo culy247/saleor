@@ -1,3 +1,4 @@
+import json
 from unittest import mock
 
 import graphene
@@ -7,9 +8,11 @@ from freezegun import freeze_time
 
 from ....channel.error_codes import ChannelErrorCode
 from ....channel.models import Channel
+from ....core.utils.json_serializer import CustomJsonEncoder
 from ....webhook.event_types import WebhookEventAsyncType
 from ....webhook.payloads import generate_meta, generate_requestor
 from ...tests.utils import assert_no_permission, get_graphql_content
+from ..enums import AllocationStrategyEnum
 
 CHANNEL_CREATE_MUTATION = """
     mutation CreateChannel($input: ChannelCreateInput!){
@@ -25,6 +28,9 @@ CHANNEL_CREATE_MUTATION = """
                 }
                 warehouses {
                     slug
+                }
+                stockSettings {
+                    allocationStrategy
                 }
             }
             errors{
@@ -46,12 +52,14 @@ def test_channel_create_mutation_as_staff_user(
     slug = "test_slug"
     currency_code = "USD"
     default_country = "US"
+    allocation_strategy = AllocationStrategyEnum.PRIORITIZE_HIGH_STOCK.name
     variables = {
         "input": {
             "name": name,
             "slug": slug,
             "currencyCode": currency_code,
             "defaultCountry": default_country,
+            "stockSettings": {"allocationStrategy": allocation_strategy},
         }
     }
 
@@ -76,6 +84,7 @@ def test_channel_create_mutation_as_staff_user(
         == channel.default_country.code
         == default_country
     )
+    assert channel_data["stockSettings"]["allocationStrategy"] == allocation_strategy
 
 
 def test_channel_create_mutation_as_app(
@@ -117,6 +126,10 @@ def test_channel_create_mutation_as_app(
         == channel.default_country.code
         == default_country
     )
+    assert (
+        channel_data["stockSettings"]["allocationStrategy"]
+        == AllocationStrategyEnum.PRIORITIZE_SORTING_ORDER.name
+    )
 
 
 def test_channel_create_mutation_as_customer(user_api_client):
@@ -125,12 +138,14 @@ def test_channel_create_mutation_as_customer(user_api_client):
     slug = "test_slug"
     currency_code = "USD"
     default_country = "US"
+    allocation_strategy = AllocationStrategyEnum.PRIORITIZE_SORTING_ORDER.name
     variables = {
         "input": {
             "name": name,
             "slug": slug,
             "currencyCode": currency_code,
             "defaultCountry": default_country,
+            "stockSettings": {"allocationStrategy": allocation_strategy},
         }
     }
 
@@ -210,12 +225,14 @@ def test_channel_create_mutation_with_duplicated_slug(
     slug = channel_USD.slug
     currency_code = "USD"
     default_country = "US"
+    allocation_strategy = AllocationStrategyEnum.PRIORITIZE_SORTING_ORDER.name
     variables = {
         "input": {
             "name": name,
             "slug": slug,
             "currencyCode": currency_code,
             "defaultCountry": default_country,
+            "stockSettings": {"allocationStrategy": allocation_strategy},
         }
     }
 
@@ -246,6 +263,7 @@ def test_channel_create_mutation_with_shipping_zones(
     shipping_zones_ids = [
         graphene.Node.to_global_id("ShippingZone", zone.pk) for zone in shipping_zones
     ]
+    allocation_strategy = AllocationStrategyEnum.PRIORITIZE_SORTING_ORDER.name
     variables = {
         "input": {
             "name": name,
@@ -253,6 +271,7 @@ def test_channel_create_mutation_with_shipping_zones(
             "currencyCode": currency_code,
             "addShippingZones": shipping_zones_ids,
             "defaultCountry": default_country,
+            "stockSettings": {"allocationStrategy": allocation_strategy},
         }
     }
 
@@ -276,6 +295,7 @@ def test_channel_create_mutation_with_shipping_zones(
     assert channel_data["currencyCode"] == channel.currency_code == currency_code
     for shipping_zone in shipping_zones:
         shipping_zone.channels.get(slug=slug)
+    assert channel_data["stockSettings"]["allocationStrategy"] == allocation_strategy
 
 
 def test_channel_create_mutation_with_warehouses(
@@ -292,6 +312,7 @@ def test_channel_create_mutation_with_warehouses(
         graphene.Node.to_global_id("Warehouse", warehouse.pk)
         for warehouse in warehouses
     ]
+    allocation_strategy = AllocationStrategyEnum.PRIORITIZE_SORTING_ORDER.name
     variables = {
         "input": {
             "name": name,
@@ -299,6 +320,7 @@ def test_channel_create_mutation_with_warehouses(
             "currencyCode": currency_code,
             "addWarehouses": warehouses_ids,
             "defaultCountry": default_country,
+            "stockSettings": {"allocationStrategy": allocation_strategy},
         }
     }
 
@@ -323,6 +345,7 @@ def test_channel_create_mutation_with_warehouses(
     assert {
         warehouse_data["slug"] for warehouse_data in channel_data["warehouses"]
     } == {warehouse.slug for warehouse in warehouses}
+    assert channel_data["stockSettings"]["allocationStrategy"] == allocation_strategy
 
 
 @freeze_time("2022-05-12 12:00:00")
@@ -344,12 +367,14 @@ def test_channel_create_mutation_trigger_webhook(
     slug = "test_slug"
     currency_code = "USD"
     default_country = "US"
+    allocation_strategy = AllocationStrategyEnum.PRIORITIZE_SORTING_ORDER.name
     variables = {
         "input": {
             "name": name,
             "slug": slug,
             "currencyCode": currency_code,
             "defaultCountry": default_country,
+            "stockSettings": {"allocationStrategy": allocation_strategy},
         }
     }
 
@@ -368,15 +393,18 @@ def test_channel_create_mutation_trigger_webhook(
     assert not data["errors"]
 
     mocked_webhook_trigger.assert_called_once_with(
-        {
-            "id": graphene.Node.to_global_id("Channel", channel.id),
-            "is_active": channel.is_active,
-            "meta": generate_meta(
-                requestor_data=generate_requestor(
-                    SimpleLazyObject(lambda: staff_api_client.user)
-                )
-            ),
-        },
+        json.dumps(
+            {
+                "id": graphene.Node.to_global_id("Channel", channel.id),
+                "is_active": channel.is_active,
+                "meta": generate_meta(
+                    requestor_data=generate_requestor(
+                        SimpleLazyObject(lambda: staff_api_client.user)
+                    )
+                ),
+            },
+            cls=CustomJsonEncoder,
+        ),
         WebhookEventAsyncType.CHANNEL_CREATED,
         [any_webhook],
         channel,

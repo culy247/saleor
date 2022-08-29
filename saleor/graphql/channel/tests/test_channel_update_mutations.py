@@ -1,3 +1,4 @@
+import json
 from unittest.mock import patch
 
 import graphene
@@ -7,9 +8,11 @@ from django.utils.text import slugify
 from freezegun import freeze_time
 
 from ....channel.error_codes import ChannelErrorCode
+from ....core.utils.json_serializer import CustomJsonEncoder
 from ....webhook.event_types import WebhookEventAsyncType
 from ....webhook.payloads import generate_meta, generate_requestor
 from ...tests.utils import assert_no_permission, get_graphql_content
+from ..enums import AllocationStrategyEnum
 
 CHANNEL_UPDATE_MUTATION = """
     mutation UpdateChannel($id: ID!,$input: ChannelUpdateInput!){
@@ -25,6 +28,9 @@ CHANNEL_UPDATE_MUTATION = """
                 }
                 warehouses {
                     slug
+                }
+                stockSettings {
+                    allocationStrategy
                 }
             }
             errors{
@@ -47,9 +53,15 @@ def test_channel_update_mutation_as_staff_user(
     name = "newName"
     slug = "new_slug"
     default_country = "FR"
+    allocation_strategy = AllocationStrategyEnum.PRIORITIZE_SORTING_ORDER.name
     variables = {
         "id": channel_id,
-        "input": {"name": name, "slug": slug, "defaultCountry": default_country},
+        "input": {
+            "name": name,
+            "slug": slug,
+            "defaultCountry": default_country,
+            "stockSettings": {"allocationStrategy": allocation_strategy},
+        },
     }
 
     # when
@@ -73,6 +85,7 @@ def test_channel_update_mutation_as_staff_user(
         == channel_USD.default_country.code
         == default_country
     )
+    assert channel_data["stockSettings"]["allocationStrategy"] == allocation_strategy
 
 
 def test_channel_update_mutation_as_app(
@@ -472,15 +485,18 @@ def test_channel_update_mutation_trigger_webhook(
     assert data["channel"]
 
     mocked_webhook_trigger.assert_called_once_with(
-        {
-            "id": channel_id,
-            "is_active": channel_USD.is_active,
-            "meta": generate_meta(
-                requestor_data=generate_requestor(
-                    SimpleLazyObject(lambda: staff_api_client.user)
-                )
-            ),
-        },
+        json.dumps(
+            {
+                "id": channel_id,
+                "is_active": channel_USD.is_active,
+                "meta": generate_meta(
+                    requestor_data=generate_requestor(
+                        SimpleLazyObject(lambda: staff_api_client.user)
+                    )
+                ),
+            },
+            cls=CustomJsonEncoder,
+        ),
         WebhookEventAsyncType.CHANNEL_UPDATED,
         [any_webhook],
         channel_USD,

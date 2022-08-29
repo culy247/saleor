@@ -25,6 +25,7 @@ from prices import Money, TaxedMoney
 from ....attribute import AttributeInputType, AttributeType
 from ....attribute.models import Attribute, AttributeValue
 from ....attribute.utils import associate_attribute_values_to_instance
+from ....core.postgres import FlatConcatSearchVector
 from ....core.taxes import TaxType
 from ....core.units import MeasurementUnits, WeightUnits
 from ....order import OrderEvents, OrderStatus
@@ -615,57 +616,6 @@ QUERY_PRODUCT_BY_ID_WITH_MEDIA = """
         }
     }
 """
-
-
-def test_product_query_with_media_to_remove(
-    user_api_client, permission_manage_products, product_with_images
-):
-    # given
-    query = QUERY_PRODUCT_BY_ID_WITH_MEDIA
-    variables = {"id": graphene.Node.to_global_id("Product", product_with_images.pk)}
-    ProductMedia.objects.filter(product=product_with_images.pk).update(to_remove=True)
-
-    # when
-    response = user_api_client.post_graphql(
-        query,
-        variables=variables,
-        permissions=(permission_manage_products,),
-        check_no_permissions=False,
-    )
-    content = get_graphql_content(response)
-    product_data = content["data"]["product"]
-
-    # then
-    assert product_data is not None
-    assert len(product_data["media"]) == 0
-
-
-def test_product_variant_query_with_media_to_remove(
-    user_api_client, permission_manage_products, variant_with_image
-):
-    # given
-    query = QUERY_PRODUCT_BY_ID_WITH_MEDIA
-    product = variant_with_image.product
-    variables = {"id": graphene.Node.to_global_id("Product", product.pk)}
-    variants_count = ProductVariant.objects.all().count()
-    ProductMedia.objects.filter(product=product.pk).update(to_remove=True)
-
-    # when
-    response = user_api_client.post_graphql(
-        query,
-        variables=variables,
-        permissions=(permission_manage_products,),
-        check_no_permissions=False,
-    )
-    content = get_graphql_content(response)
-    product_data = content["data"]["product"]
-
-    # then
-    assert product_data is not None
-    assert len(product_data["media"]) == 0
-    assert len(product_data["variants"]) == variants_count
-    for variant in product_data["variants"]:
-        assert variant["media"] == []
 
 
 def test_query_product_thumbnail_with_size_and_format_proxy_url_returned(
@@ -2378,7 +2328,7 @@ def test_products_query_with_filter_date_range_date_attributes(
     date_attribute,
     channel_USD,
 ):
-    """Ensure both products will be returned when filtering  attributes by date range,
+    """Ensure both products will be returned when filtering attributes by date range,
     products with the same date attribute value."""
 
     # given
@@ -2640,12 +2590,12 @@ def test_products_query_with_filter_date_time_range_date_time_attributes(
     date_time_attribute,
     channel_USD,
 ):
-    """Ensure both products will be returned when filtering by  attributes by date range
+    """Ensure both products will be returned when filtering by attributes by date range
     variants with the same date attribute value."""
 
     # given
     product_type = product_list[0].product_type
-    date_value = timezone.now()
+    date_value = datetime.now(tz=pytz.utc)
     product_type.product_attributes.add(date_time_attribute)
     product_type.variant_attributes.add(date_time_attribute)
     attr_value_1 = AttributeValue.objects.create(
@@ -2830,7 +2780,9 @@ def test_products_query_with_filter_category_and_search(
     product.save()
 
     for pr in [product, second_product]:
-        pr.search_vector = prepare_product_search_vector_value(pr)
+        pr.search_vector = FlatConcatSearchVector(
+            *prepare_product_search_vector_value(pr)
+        )
     Product.objects.bulk_update([product, second_product], ["search_vector"])
 
     category_id = graphene.Node.to_global_id("Category", category.id)
@@ -2962,7 +2914,9 @@ def test_products_query_with_filter(
         channel=channel_USD,
         is_published=False,
     )
-    second_product.search_vector = prepare_product_search_vector_value(second_product)
+    second_product.search_vector = FlatConcatSearchVector(
+        *prepare_product_search_vector_value(second_product)
+    )
     second_product.save(update_fields=["search_vector"])
     variables = {"filter": products_filter, "channel": channel_USD.slug}
     staff_api_client.user.user_permissions.add(permission_manage_products)
@@ -3073,8 +3027,8 @@ def test_products_query_with_filter_search_by_dropdown_attribute_value(
 
     product_with_dropdown_attr.refresh_from_db()
 
-    product_with_dropdown_attr.search_vector = prepare_product_search_vector_value(
-        product_with_dropdown_attr
+    product_with_dropdown_attr.search_vector = FlatConcatSearchVector(
+        *prepare_product_search_vector_value(product_with_dropdown_attr)
     )
     product_with_dropdown_attr.save(update_fields=["search_document", "search_vector"])
 
@@ -3136,8 +3090,8 @@ def test_products_query_with_filter_search_by_multiselect_attribute_value(
 
     product_with_multiselect_attr.refresh_from_db()
 
-    product_with_multiselect_attr.search_vector = prepare_product_search_vector_value(
-        product_with_multiselect_attr
+    product_with_multiselect_attr.search_vector = FlatConcatSearchVector(
+        *prepare_product_search_vector_value(product_with_multiselect_attr)
     )
     product_with_multiselect_attr.save(update_fields=["search_vector"])
 
@@ -3184,8 +3138,8 @@ def test_products_query_with_filter_search_by_rich_text_attribute(
 
     product_with_rich_text_attr.refresh_from_db()
 
-    product_with_rich_text_attr.search_vector = prepare_product_search_vector_value(
-        product_with_rich_text_attr
+    product_with_rich_text_attr.search_vector = FlatConcatSearchVector(
+        *prepare_product_search_vector_value(product_with_rich_text_attr)
     )
     product_with_rich_text_attr.save(update_fields=["search_vector"])
 
@@ -3232,8 +3186,8 @@ def test_products_query_with_filter_search_by_plain_text_attribute(
 
     product_with_plain_text_attr.refresh_from_db()
 
-    product_with_plain_text_attr.search_vector = prepare_product_search_vector_value(
-        product_with_plain_text_attr
+    product_with_plain_text_attr.search_vector = FlatConcatSearchVector(
+        *prepare_product_search_vector_value(product_with_plain_text_attr)
     )
     product_with_plain_text_attr.save(update_fields=["search_vector"])
 
@@ -3283,8 +3237,8 @@ def test_products_query_with_filter_search_by_numeric_attribute_value(
 
     product_with_numeric_attr.refresh_from_db()
 
-    product_with_numeric_attr.search_vector = prepare_product_search_vector_value(
-        product_with_numeric_attr
+    product_with_numeric_attr.search_vector = FlatConcatSearchVector(
+        *prepare_product_search_vector_value(product_with_numeric_attr)
     )
     product_with_numeric_attr.save(update_fields=["search_vector"])
 
@@ -3330,8 +3284,8 @@ def test_products_query_with_filter_search_by_numeric_attribute_value_without_un
 
     product_with_numeric_attr.refresh_from_db()
 
-    product_with_numeric_attr.search_vector = prepare_product_search_vector_value(
-        product_with_numeric_attr
+    product_with_numeric_attr.search_vector = FlatConcatSearchVector(
+        *prepare_product_search_vector_value(product_with_numeric_attr)
     )
     product_with_numeric_attr.save(update_fields=["search_vector"])
 
@@ -3378,8 +3332,8 @@ def test_products_query_with_filter_search_by_date_attribute_value(
 
     product_with_date_attr.refresh_from_db()
 
-    product_with_date_attr.search_vector = prepare_product_search_vector_value(
-        product_with_date_attr
+    product_with_date_attr.search_vector = FlatConcatSearchVector(
+        *prepare_product_search_vector_value(product_with_date_attr)
     )
     product_with_date_attr.save(update_fields=["search_vector"])
 
@@ -3426,8 +3380,8 @@ def test_products_query_with_filter_search_by_date_time_attribute_value(
 
     product_with_date_time_attr.refresh_from_db()
 
-    product_with_date_time_attr.search_vector = prepare_product_search_vector_value(
-        product_with_date_time_attr
+    product_with_date_time_attr.search_vector = FlatConcatSearchVector(
+        *prepare_product_search_vector_value(product_with_date_time_attr)
     )
     product_with_date_time_attr.save(update_fields=["search_vector"])
 
@@ -3580,6 +3534,41 @@ def test_products_query_with_filter_stock_availability_channel_without_shipping_
 
     assert len(products) == 1
     assert products[0]["node"]["id"] == product_id
+
+
+def test_products_query_with_filter_stock_availability_only_stock_in_cc_warehouse(
+    query_products_with_filter,
+    user_api_client,
+    product,
+    order_line,
+    channel_USD,
+    warehouse_for_cc,
+):
+    # given
+    variant = product.variants.first()
+    variant.stocks.all().delete()
+
+    Stock.objects.create(
+        warehouse=warehouse_for_cc, product_variant=variant, quantity=10
+    )
+
+    variables = {
+        "filter": {"stockAvailability": "IN_STOCK"},
+        "channel": channel_USD.slug,
+    }
+
+    # when
+    response = user_api_client.post_graphql(query_products_with_filter, variables)
+
+    # then
+    content = get_graphql_content(response)
+
+    products = content["data"]["products"]["edges"]
+
+    assert len(products) == 1
+    assert products[0]["node"]["id"] == graphene.Node.to_global_id(
+        "Product", product.id
+    )
 
 
 @pytest.mark.parametrize(
@@ -5326,7 +5315,9 @@ def test_search_product_by_description_and_name(
 
     product_list.append(product)
     for prod in product_list:
-        prod.search_vector = prepare_product_search_vector_value(prod)
+        prod.search_vector = FlatConcatSearchVector(
+            *prepare_product_search_vector_value(prod)
+        )
 
     Product.objects.bulk_update(
         product_list,
@@ -5379,7 +5370,9 @@ def test_search_product_by_description_and_name_without_sort_by(
 
     product_list.append(product)
     for prod in product_list:
-        prod.search_vector = prepare_product_search_vector_value(prod)
+        prod.search_vector = FlatConcatSearchVector(
+            *prepare_product_search_vector_value(prod)
+        )
 
     Product.objects.bulk_update(
         product_list,
@@ -5416,7 +5409,9 @@ def test_search_product_by_description_and_name_and_use_cursor(
 
     product_list.append(product)
     for prod in product_list:
-        prod.search_vector = prepare_product_search_vector_value(prod)
+        prod.search_vector = FlatConcatSearchVector(
+            *prepare_product_search_vector_value(prod)
+        )
 
     Product.objects.bulk_update(
         product_list,
@@ -8865,11 +8860,11 @@ def test_delete_product(
     mocked_recalculate_orders_task.assert_not_called()
 
 
-@patch("saleor.product.signals.delete_product_media_task.delay")
+@patch("saleor.product.signals.delete_from_storage_task.delay")
 @patch("saleor.order.tasks.recalculate_orders_task.delay")
 def test_delete_product_with_image(
     mocked_recalculate_orders_task,
-    delete_product_media_task_mock,
+    delete_from_storage_task_mock,
     staff_api_client,
     product_with_image,
     variant_with_image,
@@ -8886,7 +8881,8 @@ def test_delete_product_with_image(
 
     product_img_paths = [media.image for media in product.media.all()]
     variant_img_paths = [media.image for media in variant.media.all()]
-    product_media_ids = [media.id for media in product.media.all()]
+    product_media_paths = [media.image.name for media in product.media.all()]
+    variant_media_paths = [media.image.name for media in variant.media.all()]
     images = product_img_paths + variant_img_paths
 
     variables = {"id": node_id}
@@ -8904,10 +8900,10 @@ def test_delete_product_with_image(
         product.refresh_from_db()
     assert node_id == data["product"]["id"]
 
-    assert delete_product_media_task_mock.call_count == len(images)
+    assert delete_from_storage_task_mock.call_count == len(images)
     assert {
-        call_args.args[0] for call_args in delete_product_media_task_mock.call_args_list
-    } == set(product_media_ids)
+        call_args.args[0] for call_args in delete_from_storage_task_mock.call_args_list
+    } == set(product_media_paths + variant_media_paths)
     mocked_recalculate_orders_task.assert_not_called()
 
 
@@ -9827,9 +9823,9 @@ def test_product_image_update_mutation(
 
 
 @patch("saleor.plugins.manager.PluginsManager.product_updated")
-@patch("saleor.product.signals.delete_product_media_task.delay")
+@patch("saleor.product.signals.delete_from_storage_task.delay")
 def test_product_media_delete(
-    delete_product_media_task_mock,
+    delete_from_storage_task_mock,
     product_updated_mock,
     staff_api_client,
     product_with_image,
@@ -9847,6 +9843,7 @@ def test_product_media_delete(
             }
         """
     media_obj = product.media.first()
+    media_img_path = media_obj.image.name
     node_id = graphene.Node.to_global_id("ProductMedia", media_obj.id)
     variables = {"id": node_id}
     response = staff_api_client.post_graphql(
@@ -9855,11 +9852,11 @@ def test_product_media_delete(
     content = get_graphql_content(response)
     data = content["data"]["productMediaDelete"]
     assert media_obj.image.url in data["media"]["url"]
-    media_obj.refresh_from_db()
-    assert media_obj.to_remove
+    with pytest.raises(media_obj._meta.model.DoesNotExist):
+        media_obj.refresh_from_db()
     assert node_id == data["media"]["id"]
     product_updated_mock.assert_called_once_with(product)
-    delete_product_media_task_mock.assert_called_once_with(media_obj.id)
+    delete_from_storage_task_mock.assert_called_once_with(media_img_path)
 
 
 PRODUCT_MEDIA_REORDER = """
@@ -9975,51 +9972,6 @@ def test_reorder_not_existing_media(
         response["data"]["productMediaReorder"]["errors"][0]["code"]
         == ProductErrorCode.NOT_FOUND.name
     )
-
-
-@patch("saleor.plugins.manager.PluginsManager.product_updated")
-def test_reorder_media_some_media_marked_as_to_remove(
-    product_updated_mock,
-    staff_api_client,
-    product_with_images,
-    permission_manage_products,
-):
-    """Ensure that no error is raised when number of provided ids is equal to number
-    of media with `to_remove` flag set to False.
-    """
-    query = PRODUCT_MEDIA_REORDER
-    product = product_with_images
-    media = product.media.all()
-    media_0 = media[0]
-    media_1 = media[1]
-
-    media_1.to_remove = True
-    media_1.save(update_fields=["to_remove"])
-
-    file_mock_2 = MagicMock(spec=File, name="FileMock2")
-    file_mock_2.name = "image2.jpg"
-    media_2 = product.media.create(image=file_mock_2)
-
-    media_0_id = graphene.Node.to_global_id("ProductMedia", media_0.id)
-    media_2_id = graphene.Node.to_global_id("ProductMedia", media_2.id)
-
-    product_id = graphene.Node.to_global_id("Product", product.id)
-
-    variables = {"product_id": product_id, "media_ids": [media_2_id, media_0_id]}
-    response = staff_api_client.post_graphql(
-        query, variables, permissions=[permission_manage_products]
-    )
-    get_graphql_content(response)
-
-    # Check if order has been changed
-    product.refresh_from_db()
-    reordered_media = product.media.all()
-    reordered_media_0 = reordered_media[0]
-    reordered_media_1 = reordered_media[1]
-
-    assert media_0.id == reordered_media_1.id
-    assert media_2.id == reordered_media_0.id
-    product_updated_mock.assert_called_once_with(product)
 
 
 ASSIGN_VARIANT_QUERY = """
@@ -11957,7 +11909,6 @@ def test_update_or_create_variant_with_back_in_stock_webhooks_only_success(
     settings,
     variant,
     warehouses,
-    info,
 ):
 
     Stock.objects.bulk_create(
@@ -11968,14 +11919,14 @@ def test_update_or_create_variant_with_back_in_stock_webhooks_only_success(
     )
 
     settings.PLUGINS = ["saleor.plugins.webhook.plugin.WebhookPlugin"]
-    info.context.plugins = get_plugins_manager()
+    plugins = get_plugins_manager()
     stocks_data = [
         {"quantity": 10, "warehouse": "123"},
     ]
     assert variant.stocks.aggregate(Sum("quantity"))["quantity__sum"] == 0
 
     ProductVariantStocksUpdate.update_or_create_variant_stocks(
-        variant, stocks_data, warehouses, info.context.plugins
+        variant, stocks_data, warehouses, plugins
     )
 
     assert variant.stocks.aggregate(Sum("quantity"))["quantity__sum"] == 10
@@ -11995,7 +11946,6 @@ def test_update_or_create_variant_with_back_in_stock_webhooks_only_failed(
     settings,
     variant,
     warehouses,
-    info,
 ):
 
     Stock.objects.bulk_create(
@@ -12006,14 +11956,14 @@ def test_update_or_create_variant_with_back_in_stock_webhooks_only_failed(
     )
 
     settings.PLUGINS = ["saleor.plugins.webhook.plugin.WebhookPlugin"]
-    info.context.plugins = get_plugins_manager()
+    plugins = get_plugins_manager()
     stocks_data = [
         {"quantity": 0, "warehouse": "123"},
     ]
     assert variant.stocks.aggregate(Sum("quantity"))["quantity__sum"] == 0
 
     ProductVariantStocksUpdate.update_or_create_variant_stocks(
-        variant, stocks_data, warehouses, info.context.plugins
+        variant, stocks_data, warehouses, plugins
     )
 
     assert variant.stocks.aggregate(Sum("quantity"))["quantity__sum"] == 0
@@ -12033,7 +11983,6 @@ def test_update_or_create_variant_stocks_with_out_of_stock_webhook_only(
     settings,
     variant,
     warehouses,
-    info,
 ):
 
     Stock.objects.bulk_create(
@@ -12045,7 +11994,7 @@ def test_update_or_create_variant_stocks_with_out_of_stock_webhook_only(
 
     settings.PLUGINS = ["saleor.plugins.webhook.plugin.WebhookPlugin"]
 
-    info.context.plugins = get_plugins_manager()
+    plugins = get_plugins_manager()
 
     stocks_data = [
         {"quantity": 0, "warehouse": "123"},
@@ -12055,7 +12004,7 @@ def test_update_or_create_variant_stocks_with_out_of_stock_webhook_only(
     assert variant.stocks.aggregate(Sum("quantity"))["quantity__sum"] == 10
 
     ProductVariantStocksUpdate.update_or_create_variant_stocks(
-        variant, stocks_data, warehouses, info.context.plugins
+        variant, stocks_data, warehouses, plugins
     )
 
     assert variant.stocks.aggregate(Sum("quantity"))["quantity__sum"] == 2

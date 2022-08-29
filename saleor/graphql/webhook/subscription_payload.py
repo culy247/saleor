@@ -62,7 +62,10 @@ def check_document_is_single_subscription(document: GraphQLDocument) -> bool:
             pass
         elif isinstance(definition, OperationDefinition):
             if definition.operation == "subscription":
+                if len(definition.selection_set.selections) != 1:
+                    return False
                 subscriptions.append(definition)
+
             else:
                 return False
         else:
@@ -70,7 +73,7 @@ def check_document_is_single_subscription(document: GraphQLDocument) -> bool:
     return len(subscriptions) == 1
 
 
-def initialize_request(requestor=None) -> HttpRequest:
+def initialize_request(requestor=None, sync_event=False) -> HttpRequest:
     """Prepare a request object for webhook subscription.
 
     It creates a dummy request object.
@@ -92,6 +95,7 @@ def initialize_request(requestor=None) -> HttpRequest:
         request.META["HTTP_X_FORWARDED_PROTO"] = "https"
         request.META["SERVER_PORT"] = "443"
 
+    request.sync_event = sync_event  # type: ignore
     request.requestor = requestor  # type: ignore
     request.request_time = request_time  # type: ignore
     request.site = SimpleLazyObject(lambda: Site.objects.get_current())  # type: ignore

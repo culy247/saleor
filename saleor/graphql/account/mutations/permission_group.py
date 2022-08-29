@@ -17,6 +17,7 @@ from ...account.utils import (
     get_out_of_scope_permissions,
     get_out_of_scope_users,
 )
+from ...app.dataloaders import load_app
 from ...core.enums import PermissionEnum
 from ...core.mutations import ModelDeleteMutation, ModelMutation
 from ...core.types import NonNullList, PermissionGroupError
@@ -73,6 +74,10 @@ class PermissionGroupCreate(ModelMutation):
             instance.user_set.add(*users)
 
     @classmethod
+    def post_save_action(cls, info, instance, cleaned_input):
+        info.context.plugins.permission_group_created(instance)
+
+    @classmethod
     def clean_input(cls, info, instance, data):
         cleaned_input = super().clean_input(info, instance, data)
 
@@ -105,7 +110,8 @@ class PermissionGroupCreate(ModelMutation):
 
     @classmethod
     def check_permissions(cls, context, permissions=None):
-        if context.app:
+        app = load_app(context)
+        if app:
             raise PermissionDenied(
                 message="Apps are not allowed to perform this mutation."
             )
@@ -216,6 +222,10 @@ class PermissionGroupUpdate(PermissionGroupCreate):
         remove_permissions = cleaned_data.get("remove_permissions")
         if remove_permissions:
             instance.permissions.remove(*remove_permissions)
+
+    @classmethod
+    def post_save_action(cls, info, instance, cleaned_input):
+        info.context.plugins.permission_group_updated(instance)
 
     @classmethod
     def clean_input(
@@ -431,6 +441,10 @@ class PermissionGroupDelete(ModelDeleteMutation):
         error_type_field = "permission_group_errors"
 
     @classmethod
+    def post_save_action(cls, info, instance, cleaned_input):
+        info.context.plugins.permission_group_deleted(instance)
+
+    @classmethod
     def clean_instance(cls, info, instance):
         requestor = info.context.user
         if requestor.is_superuser:
@@ -444,7 +458,8 @@ class PermissionGroupDelete(ModelDeleteMutation):
 
     @classmethod
     def check_permissions(cls, context, permissions=None):
-        if context.app:
+        app = load_app(context)
+        if app:
             raise PermissionDenied(
                 message="Apps are not allowed to perform this mutation."
             )

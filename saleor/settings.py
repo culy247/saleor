@@ -11,6 +11,7 @@ import pkg_resources
 import sentry_sdk
 import sentry_sdk.utils
 from celery.schedules import crontab
+from django.conf import global_settings
 from django.core.exceptions import ImproperlyConfigured
 from django.core.management.utils import get_random_secret_key
 from graphql.execution import executor
@@ -52,6 +53,8 @@ ADMINS = (
     # ('Your Name', 'your_email@example.com'),
 )
 MANAGERS = ADMINS
+
+APPEND_SLASH = False
 
 _DEFAULT_CLIENT_HOSTS = "localhost,127.0.0.1"
 
@@ -172,6 +175,14 @@ TEMPLATES = [
 
 # Make this unique, and don't share it with anybody.
 SECRET_KEY = os.environ.get("SECRET_KEY")
+
+# Additional password algorithms that can be used by Saleor.
+# The first algorithm defined by Django is the preferred one; users not using the
+# first algorithm will automatically be upgraded to it upon login
+PASSWORD_HASHERS = [
+    *global_settings.PASSWORD_HASHERS,
+    "django.contrib.auth.hashers.BCryptPasswordHasher",
+]
 
 if not SECRET_KEY and DEBUG:
     warnings.warn("SECRET_KEY not configured, using a random temporary key.")
@@ -552,6 +563,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "saleor.discount.tasks.send_sale_toggle_notifications",
         "schedule": initiated_sale_webhook_schedule,
     },
+    "update-products-search-vectors": {
+        "task": "saleor.product.tasks.update_products_search_vector_task",
+        "schedule": timedelta(seconds=20),
+    },
 }
 
 # The maximum wait time between each is_due() call on schedulers
@@ -570,7 +585,7 @@ OBSERVABILITY_REPORT_ALL_API_CALLS = get_bool_from_env(
     "OBSERVABILITY_REPORT_ALL_API_CALLS", False
 )
 OBSERVABILITY_MAX_PAYLOAD_SIZE = int(
-    os.environ.get("OBSERVABILITY_MAX_PAYLOAD_SIZE", 128 * 1024)
+    os.environ.get("OBSERVABILITY_MAX_PAYLOAD_SIZE", 25 * 1000)
 )
 OBSERVABILITY_BUFFER_SIZE_LIMIT = int(
     os.environ.get("OBSERVABILITY_BUFFER_SIZE_LIMIT", 1000)
@@ -581,11 +596,20 @@ OBSERVABILITY_BUFFER_BATCH_SIZE = int(
 OBSERVABILITY_REPORT_PERIOD = timedelta(
     seconds=parse(os.environ.get("OBSERVABILITY_REPORT_PERIOD", "20 seconds"))
 )
+OBSERVABILITY_BUFFER_TIMEOUT = timedelta(
+    seconds=parse(os.environ.get("OBSERVABILITY_BUFFER_TIMEOUT", "5 minutes"))
+)
 if OBSERVABILITY_ACTIVE:
     CELERY_BEAT_SCHEDULE["observability-reporter"] = {
         "task": "saleor.plugins.webhook.tasks.observability_reporter_task",
         "schedule": OBSERVABILITY_REPORT_PERIOD,
+        "options": {"expires": OBSERVABILITY_REPORT_PERIOD.total_seconds()},
     }
+    if OBSERVABILITY_BUFFER_TIMEOUT < OBSERVABILITY_REPORT_PERIOD * 2:
+        warnings.warn(
+            "OBSERVABILITY_REPORT_PERIOD is too big compared to "
+            "OBSERVABILITY_BUFFER_TIMEOUT. That can lead to a loss of events."
+        )
 
 # Change this value if your application is running behind a proxy,
 # e.g. HTTP_CF_Connecting_IP for Cloudflare or X_FORWARDED_FOR
@@ -596,6 +620,11 @@ DEFAULT_MENUS = {"top_menu_name": "navbar", "bottom_menu_name": "footer"}
 
 # Slug for channel precreated in Django migrations
 DEFAULT_CHANNEL_SLUG = os.environ.get("DEFAULT_CHANNEL_SLUG", "default-channel")
+
+# Set this to `True` if you want to create default channel, warehouse, product type and
+# category during migrations. It makes it easier for the users to create their first
+# product.
+POPULATE_DEFAULTS = get_bool_from_env("POPULATE_DEFAULTS", True)
 
 
 #  Sentry
@@ -721,8 +750,30 @@ JWT_TTL_REQUEST_EMAIL_CHANGE = timedelta(
     seconds=parse(os.environ.get("JWT_TTL_REQUEST_EMAIL_CHANGE", "1 hour")),
 )
 
+CHECKOUT_PRICES_TTL = timedelta(
+    seconds=parse(os.environ.get("CHECKOUT_PRICES_TTL", "1 hour"))
+)
+
+# The maximum SearchVector expression count allowed per index SQL statement
+# If the count is exceeded, the expression list will be truncated
+INDEX_MAXIMUM_EXPR_COUNT = 4000
+
+# Maximum related objects that can be indexed in an order
+SEARCH_ORDERS_MAX_INDEXED_PAYMENTS = 20
+SEARCH_ORDERS_MAX_INDEXED_DISCOUNTS = 20
+SEARCH_ORDERS_MAX_INDEXED_LINES = 100
+
+# Maximum related objects that can be indexed in a product
+PRODUCT_MAX_INDEXED_ATTRIBUTES = 1000
+PRODUCT_MAX_INDEXED_ATTRIBUTE_VALUES = 100
+PRODUCT_MAX_INDEXED_VARIANTS = 1000
+
 
 # Patch SubscriberExecutionContext class from `graphql-core-legacy` package
 # to fix bug causing not returning errors for subscription queries.
 
 executor.SubscriberExecutionContext = PatchedSubscriberExecutionContext  # type: ignore
+
+UPDATE_SEARCH_VECTOR_INDEX_QUEUE_NAME = os.environ.get(
+    "UPDATE_SEARCH_VECTOR_INDEX_QUEUE_NAME", None
+)

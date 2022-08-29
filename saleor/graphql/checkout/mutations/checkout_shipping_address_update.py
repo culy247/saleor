@@ -1,4 +1,4 @@
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 import graphene
 from django.core.exceptions import ValidationError
@@ -12,8 +12,8 @@ from ....checkout.fetch import (
 )
 from ....checkout.utils import (
     change_shipping_address_in_checkout,
+    invalidate_checkout_prices,
     is_shipping_required,
-    recalculate_checkout_discount,
 )
 from ....core.tracing import traced_atomic_transaction
 from ....product import models as product_models
@@ -37,6 +37,9 @@ from .utils import (
     get_checkout,
     update_checkout_shipping_method_if_invalid,
 )
+
+if TYPE_CHECKING:
+    from ....checkout.fetch import DeliveryMethodBase
 
 
 class CheckoutShippingAddressUpdate(BaseMutation, I18nMixin):
@@ -82,6 +85,7 @@ class CheckoutShippingAddressUpdate(BaseMutation, I18nMixin):
         lines: Iterable["CheckoutLineInfo"],
         country: str,
         channel_slug: str,
+        delivery_method_info: "DeliveryMethodBase",
     ) -> None:
         variant_ids = [line_info.variant.id for line_info in lines]
         variants = list(
@@ -96,6 +100,7 @@ class CheckoutShippingAddressUpdate(BaseMutation, I18nMixin):
             country,
             channel_slug,
             info.context.site.settings.limit_quantity_per_checkout,
+            delivery_method_info=delivery_method_info,
             # Set replace=True to avoid existing_lines and quantities from
             # being counted twice by the check_stock_quantity_bulk
             replace=True,
@@ -161,13 +166,20 @@ class CheckoutShippingAddressUpdate(BaseMutation, I18nMixin):
 
         # Resolve and process the lines, validating variants quantities
         if lines:
-            cls.process_checkout_lines(info, lines, country, checkout_info.channel.slug)
+            cls.process_checkout_lines(
+                info,
+                lines,
+                country,
+                checkout_info.channel.slug,
+                checkout_info.delivery_method_info,
+            )
 
         update_checkout_shipping_method_if_invalid(checkout_info, lines)
 
+        shipping_address_updated_fields = []
         with traced_atomic_transaction():
             shipping_address_instance.save()
-            change_shipping_address_in_checkout(
+            shipping_address_updated_fields = change_shipping_address_in_checkout(
                 checkout_info,
                 shipping_address_instance,
                 lines,
@@ -175,7 +187,14 @@ class CheckoutShippingAddressUpdate(BaseMutation, I18nMixin):
                 manager,
                 shipping_channel_listings,
             )
-        recalculate_checkout_discount(manager, checkout_info, lines, discounts)
+        invalidate_prices_updated_fields = invalidate_checkout_prices(
+            checkout_info, lines, manager, discounts, save=False
+        )
+        checkout.save(
+            update_fields=shipping_address_updated_fields
+            + invalidate_prices_updated_fields
+        )
 
         manager.checkout_updated(checkout)
+
         return CheckoutShippingAddressUpdate(checkout=checkout)

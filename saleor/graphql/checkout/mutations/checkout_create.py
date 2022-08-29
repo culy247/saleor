@@ -11,10 +11,12 @@ from ....product import models as product_models
 from ....warehouse.reservations import get_reservation_length, is_reservation_enabled
 from ...account.i18n import I18nMixin
 from ...account.types import AddressInput
+from ...app.dataloaders import load_app
 from ...channel.utils import clean_channel
 from ...core.descriptions import (
     ADDED_IN_31,
     ADDED_IN_35,
+    ADDED_IN_36,
     DEPRECATED_IN_3X_FIELD,
     PREVIEW_FEATURE,
 )
@@ -28,7 +30,8 @@ from ..types import Checkout
 from .utils import (
     check_lines_quantity,
     check_permissions_for_custom_prices,
-    group_quantity_and_custom_prices_by_variants,
+    get_variants_and_total_quantities,
+    group_lines_input_on_add,
     validate_variants_are_published,
     validate_variants_available_for_purchase,
 )
@@ -92,6 +95,14 @@ class CheckoutLineInput(graphene.InputObjectType):
             "will be provided multiple times, the last price will be used."
             + ADDED_IN_31
             + PREVIEW_FEATURE
+        ),
+    )
+    force_new_line = graphene.Boolean(
+        required=False,
+        default_value=False,
+        description=(
+            "Flag that allow force splitting the same variant into multiple lines "
+            "by skipping the matching logic. " + ADDED_IN_36 + PREVIEW_FEATURE
         ),
     )
 
@@ -158,7 +169,8 @@ class CheckoutCreate(ModelMutation, I18nMixin):
     def clean_checkout_lines(
         cls, info, lines, country, channel
     ) -> Tuple[List[product_models.ProductVariant], List["CheckoutLineData"]]:
-        check_permissions_for_custom_prices(info.context.app, lines)
+        app = load_app(info.context)
+        check_permissions_for_custom_prices(app, lines)
         variant_ids = [line["variant_id"] for line in lines]
         variants = cls.get_nodes_or_error(
             variant_ids,
@@ -169,7 +181,7 @@ class CheckoutCreate(ModelMutation, I18nMixin):
             ),
         )
 
-        checkout_lines_data = group_quantity_and_custom_prices_by_variants(lines)
+        checkout_lines_data = group_lines_input_on_add(lines)
 
         variant_db_ids = {variant.id for variant in variants}
         validate_variants_available_for_purchase(variant_db_ids, channel.id)
@@ -177,7 +189,11 @@ class CheckoutCreate(ModelMutation, I18nMixin):
             variant_db_ids, channel.id, CheckoutErrorCode.UNAVAILABLE_VARIANT_IN_CHANNEL
         )
         validate_variants_are_published(variant_db_ids, channel.id)
-        quantities = [line_data.quantity for line_data in checkout_lines_data]
+
+        variants, quantities = get_variants_and_total_quantities(
+            variants, checkout_lines_data
+        )
+
         check_lines_quantity(
             variants,
             quantities,
@@ -287,7 +303,7 @@ class CheckoutCreate(ModelMutation, I18nMixin):
                 instance,
                 variants,
                 checkout_lines_data,
-                channel.slug,
+                channel,
                 info.context.site.settings.limit_quantity_per_checkout,
                 reservation_length=get_reservation_length(info.context),
             )
