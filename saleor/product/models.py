@@ -31,7 +31,6 @@ from django.db.models import (
 from django.db.models.functions import Coalesce
 from django.urls import reverse
 from django.utils import timezone
-from django.utils.encoding import smart_text
 from django_measurement.models import MeasurementField
 from django_prices.models import MoneyField
 from measurement.measures import Weight
@@ -51,20 +50,17 @@ from ..core.permissions import (
 )
 from ..core.units import WeightUnits
 from ..core.utils import build_absolute_uri
-from ..core.utils.draftjs import json_content_to_raw_text
 from ..core.utils.editorjs import clean_editor_js
 from ..core.utils.translations import Translation, TranslationProxy
 from ..core.weight import zero_weight
 from ..discount import DiscountInfo
 from ..discount.utils import calculate_discounted_price
 from ..seo.models import SeoModel, SeoModelTranslation
+from ..tax.models import TaxClass
 from . import ProductMediaTypes, ProductTypeKind
 
 if TYPE_CHECKING:
-    # flake8: noqa
     from decimal import Decimal
-
-    from django.db.models import OrderBy
 
     from ..account.models import User
     from ..app.models import App
@@ -92,7 +88,7 @@ class Category(ModelWithMetadata, MPTTModel, SeoModel):
     background_image_alt = models.CharField(max_length=128, blank=True)
 
     objects = models.Manager()
-    tree = TreeManager()
+    tree = TreeManager()  # type: ignore
     translated = TranslationProxy()
 
     class Meta:
@@ -157,6 +153,13 @@ class ProductType(ModelWithMetadata):
         measurement=Weight,
         unit_choices=WeightUnits.CHOICES,  # type: ignore
         default=zero_weight,
+    )
+    tax_class = models.ForeignKey(
+        TaxClass,
+        related_name="product_types",
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
     )
 
     class Meta(ModelWithMetadata.Meta):
@@ -397,7 +400,7 @@ class Product(SeoModel, ModelWithMetadata):
     description_plaintext = TextField(blank=True)
     search_document = models.TextField(blank=True, default="")
     search_vector = SearchVectorField(blank=True, null=True)
-    search_index_dirty = models.BooleanField(default=False)
+    search_index_dirty = models.BooleanField(default=False, db_index=True)
 
     category = models.ForeignKey(
         Category,
@@ -423,6 +426,13 @@ class Product(SeoModel, ModelWithMetadata):
         related_name="+",
     )
     rating = models.FloatField(null=True, blank=True)
+    tax_class = models.ForeignKey(
+        TaxClass,
+        related_name="products",
+        blank=True,
+        null=True,
+        on_delete=models.SET_NULL,
+    )
 
     objects = models.Manager.from_queryset(ProductsQueryset)()
     translated = TranslationProxy()
@@ -658,7 +668,7 @@ class ProductVariant(SortableModel, ModelWithMetadata):
         product_display = (
             f"{product} ({variant_display})" if variant_display else str(product)
         )
-        return smart_text(product_display)
+        return product_display
 
     def get_ordering_queryset(self):
         return self.product.variants.all()

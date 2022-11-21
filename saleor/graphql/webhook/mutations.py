@@ -8,6 +8,7 @@ from ..app.dataloaders import load_app
 from ..core.descriptions import ADDED_IN_32, DEPRECATED_IN_3X_INPUT, PREVIEW_FEATURE
 from ..core.mutations import BaseMutation, ModelDeleteMutation, ModelMutation
 from ..core.types import NonNullList, WebhookError
+from ..plugins.dataloaders import load_plugin_manager
 from . import enums
 from .subscription_payload import validate_query
 from .types import EventDelivery, Webhook
@@ -257,7 +258,7 @@ class WebhookDelete(ModelDeleteMutation):
                 app.webhooks.get(id=object_id)
             except models.Webhook.DoesNotExist:
                 raise ValidationError(
-                    "Couldn't resolve to a node: %s" % node_id,
+                    f"Couldn't resolve to a node: {node_id}",
                     code=WebhookErrorCode.GRAPHQL_ERROR,
                 )
 
@@ -284,6 +285,6 @@ class EventDeliveryRetry(BaseMutation):
             data["id"],
             only_type=EventDelivery,
         )
-        manager = info.context.plugins
+        manager = load_plugin_manager(info.context)
         manager.event_delivery_retry(delivery)
         return EventDeliveryRetry(delivery=delivery)

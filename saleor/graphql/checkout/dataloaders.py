@@ -15,7 +15,12 @@ from ...discount import VoucherType
 from ...payment.models import TransactionItem
 from ..account.dataloaders import AddressByIdLoader, UserByUserIdLoader
 from ..core.dataloaders import DataLoader
-from ..discount.dataloaders import VoucherByCodeLoader, VoucherInfoByVoucherCodeLoader
+from ..discount.dataloaders import (
+    VoucherByCodeLoader,
+    VoucherInfoByVoucherCodeLoader,
+    load_discounts,
+)
+from ..plugins.dataloaders import load_plugin_manager
 from ..product.dataloaders import (
     CollectionsByVariantIdLoader,
     ProductByVariantIdLoader,
@@ -27,6 +32,7 @@ from ..shipping.dataloaders import (
     ShippingMethodByIdLoader,
     ShippingMethodChannelListingByChannelSlugLoader,
 )
+from ..tax.dataloaders import TaxClassByVariantIdLoader, TaxConfigurationByChannelId
 from ..warehouse.dataloaders import WarehouseByIdLoader
 
 
@@ -58,6 +64,7 @@ class CheckoutLinesInfoByCheckoutTokenLoader(DataLoader):
                     products,
                     product_types,
                     collections,
+                    tax_classes,
                     channel_listings,
                     voucher_infos,
                 ) = results
@@ -65,6 +72,7 @@ class CheckoutLinesInfoByCheckoutTokenLoader(DataLoader):
                 products_map = dict(zip(variants_pks, products))
                 product_types_map = dict(zip(variants_pks, product_types))
                 collections_map = dict(zip(variants_pks, collections))
+                tax_class_map = dict(zip(variants_pks, tax_classes))
                 channel_listings_map = dict(
                     zip(variant_ids_channel_ids, channel_listings)
                 )
@@ -87,6 +95,7 @@ class CheckoutLinesInfoByCheckoutTokenLoader(DataLoader):
                                 product=products_map[line.variant_id],
                                 product_type=product_types_map[line.variant_id],
                                 collections=collections_map[line.variant_id],
+                                tax_class=tax_class_map[line.variant_id],
                             )
                             for line in lines
                         ]
@@ -103,11 +112,12 @@ class CheckoutLinesInfoByCheckoutTokenLoader(DataLoader):
                         voucher.type == VoucherType.SPECIFIC_PRODUCT
                         or voucher.apply_once_per_order
                     ):
+                        discounts = load_discounts(self.context)
                         apply_voucher_to_checkout_line(
                             voucher_info=voucher_info,
                             checkout=checkout,
                             lines_info=lines_info_map[checkout.pk],
-                            discounts=self.context.discounts,
+                            discounts=discounts,
                         )
                 return [lines_info_map[key] for key in keys]
 
@@ -117,6 +127,9 @@ class CheckoutLinesInfoByCheckoutTokenLoader(DataLoader):
                 variants_pks
             )
             collections = CollectionsByVariantIdLoader(self.context).load_many(
+                variants_pks
+            )
+            tax_classes = TaxClassByVariantIdLoader(self.context).load_many(
                 variants_pks
             )
 
@@ -142,6 +155,7 @@ class CheckoutLinesInfoByCheckoutTokenLoader(DataLoader):
                     products,
                     product_types,
                     collections,
+                    tax_classes,
                     channel_listings,
                     voucher_infos,
                 ]
@@ -164,7 +178,7 @@ class CheckoutByUserLoader(DataLoader):
         checkout_by_user_map = defaultdict(list)
         for checkout in checkouts:
             checkout_by_user_map[checkout.user_id].append(checkout)
-        return [checkout_by_user_map.get(user_id) for user_id in keys]
+        return [checkout_by_user_map[user_id] for user_id in keys]
 
 
 class CheckoutByUserAndChannelLoader(DataLoader):
@@ -186,7 +200,7 @@ class CheckoutByUserAndChannelLoader(DataLoader):
         for checkout in checkouts:
             key = (checkout.user_id, checkout.channel_slug)
             checkout_by_user_and_channel_map[key].append(checkout)
-        return [checkout_by_user_and_channel_map.get(key) for key in keys]
+        return [checkout_by_user_and_channel_map[key] for key in keys]
 
 
 class CheckoutInfoByCheckoutTokenLoader(DataLoader):
@@ -244,6 +258,10 @@ class CheckoutInfoByCheckoutTokenLoader(DataLoader):
                     if checkout.voucher_code
                 }
                 vouchers = VoucherByCodeLoader(self.context).load_many(voucher_codes)
+                channel_ids = [channel.id for channel in channels]
+                tax_configurations = TaxConfigurationByChannelId(
+                    self.context
+                ).load_many(channel_ids)
 
                 def with_checkout_info(results):
                     (
@@ -253,6 +271,7 @@ class CheckoutInfoByCheckoutTokenLoader(DataLoader):
                         listings_for_channels,
                         collection_points,
                         vouchers,
+                        tax_configurations,
                     ) = results
                     address_map = {address.id: address for address in addresses}
                     user_map = {user.id: user for user in users}
@@ -265,6 +284,10 @@ class CheckoutInfoByCheckoutTokenLoader(DataLoader):
                         for collection_point in collection_points
                     }
                     voucher_map = {voucher.code: voucher for voucher in vouchers}
+                    tax_configuration_by_channel_map = {
+                        tax_configuration.channel_id: tax_configuration
+                        for tax_configuration in tax_configurations
+                    }
 
                     checkout_info_map = {}
                     for key, checkout, channel, checkout_lines in zip(
@@ -292,13 +315,15 @@ class CheckoutInfoByCheckoutTokenLoader(DataLoader):
                                 checkout.shipping_address_id
                             ),
                             delivery_method_info=delivery_method_info,
+                            tax_configuration=tax_configuration_by_channel_map.get(
+                                channel.id
+                            ),
                             valid_pick_up_points=[],
                             all_shipping_methods=[],
                             voucher=voucher,
                         )
-
-                        manager = self.context.plugins
-                        discounts = self.context.discounts
+                        manager = load_plugin_manager(self.context)
+                        discounts = load_discounts(self.context)
                         shipping_method_listings = [
                             listing
                             for channel_listings in listings_for_channels
@@ -327,6 +352,7 @@ class CheckoutInfoByCheckoutTokenLoader(DataLoader):
                         shipping_method_channel_listings,
                         collection_points,
                         vouchers,
+                        tax_configurations,
                     ]
                 ).then(with_checkout_info)
 

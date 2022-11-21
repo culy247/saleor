@@ -1,4 +1,6 @@
 import ast
+import logging
+import os
 import os.path
 import warnings
 from datetime import timedelta
@@ -71,6 +73,11 @@ ALLOWED_CLIENT_HOSTS = get_list(ALLOWED_CLIENT_HOSTS)
 
 INTERNAL_IPS = get_list(os.environ.get("INTERNAL_IPS", "127.0.0.1"))
 
+# Maximum time in seconds Django can keep the database connections opened.
+# Set the value to 0 to disable connection persistence, database connections
+# will be closed after each request.
+DB_CONN_MAX_AGE = int(os.environ.get("DB_CONN_MAX_AGE", 600))
+
 DATABASE_CONNECTION_DEFAULT_NAME = "default"
 # TODO: For local envs will be activated in separate PR.
 # We need to update docs an saleor platform.
@@ -79,15 +86,18 @@ DATABASE_CONNECTION_REPLICA_NAME = "default"
 
 DATABASES = {
     DATABASE_CONNECTION_DEFAULT_NAME: dj_database_url.config(
-        default="postgres://saleor:saleor@localhost:5432/saleor", conn_max_age=600
+        default="postgres://saleor:saleor@localhost:5432/saleor",
+        conn_max_age=DB_CONN_MAX_AGE,
     ),
     # TODO: We need to add read only user to saleor platfrom, and we need to update
     # docs.
     # DATABASE_CONNECTION_REPLICA_NAME: dj_database_url.config(
     #     default="postgres://saleor_read_only:saleor@localhost:5432/saleor",
-    #     conn_max_age=600,
+    #     conn_max_age=DB_CONN_MAX_AGE,
     # ),
 }
+
+DATABASE_ROUTERS = ["saleor.core.db_routers.PrimaryReplicaRouter"]
 
 DEFAULT_AUTO_FIELD = "django.db.models.AutoField"
 
@@ -105,10 +115,11 @@ EMAIL_URL = os.environ.get("EMAIL_URL")
 SENDGRID_USERNAME = os.environ.get("SENDGRID_USERNAME")
 SENDGRID_PASSWORD = os.environ.get("SENDGRID_PASSWORD")
 if not EMAIL_URL and SENDGRID_USERNAME and SENDGRID_PASSWORD:
-    EMAIL_URL = "smtp://%s:%s@smtp.sendgrid.net:587/?tls=True" % (
-        SENDGRID_USERNAME,
-        SENDGRID_PASSWORD,
+    EMAIL_URL = (
+        f"smtp://{SENDGRID_USERNAME}"
+        f":{SENDGRID_PASSWORD}@smtp.sendgrid.net:587/?tls=True"
     )
+
 email_config = dj_email_url.parse(
     EMAIL_URL or "console://demo@example.com:console@example/"
 )
@@ -198,10 +209,7 @@ MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.middleware.common.CommonMiddleware",
     "saleor.core.middleware.request_time",
-    "saleor.core.middleware.discounts",
     "saleor.core.middleware.google_analytics",
-    "saleor.core.middleware.site",
-    "saleor.core.middleware.plugins",
     "saleor.core.middleware.jwt_refresh_token_middleware",
 ]
 
@@ -235,6 +243,7 @@ INSTALLED_APPS = [
     "saleor.site",
     "saleor.page",
     "saleor.payment",
+    "saleor.tax",
     "saleor.warehouse",
     "saleor.webhook",
     "saleor.app",
@@ -281,6 +290,10 @@ if ENABLE_DEBUG_TOOLBAR:
             "debug_toolbar.panels.profiling.ProfilingPanel",
         ]
         DEBUG_TOOLBAR_CONFIG = {"RESULTS_CACHE_SIZE": 100}
+
+# Make the `logging` Python module capture `warnings.warn()` calls
+# This is needed in order to log them as JSON when DEBUG=False
+logging.captureWarnings(True)
 
 LOGGING = {
     "version": 1,
@@ -440,8 +453,11 @@ AWS_DEFAULT_ACL = os.environ.get("AWS_DEFAULT_ACL", None)
 AWS_S3_FILE_OVERWRITE = get_bool_from_env("AWS_S3_FILE_OVERWRITE", True)
 
 # Google Cloud Storage configuration
+# See https://django-storages.readthedocs.io/en/latest/backends/gcloud.html
 GS_PROJECT_ID = os.environ.get("GS_PROJECT_ID")
 GS_BUCKET_NAME = os.environ.get("GS_BUCKET_NAME")
+GS_LOCATION = os.environ.get("GS_LOCATION", "")
+GS_CUSTOM_ENDPOINT = os.environ.get("GS_CUSTOM_ENDPOINT")
 GS_MEDIA_BUCKET_NAME = os.environ.get("GS_MEDIA_BUCKET_NAME")
 GS_AUTO_CREATE_BUCKET = get_bool_from_env("GS_AUTO_CREATE_BUCKET", False)
 GS_QUERYSTRING_AUTH = get_bool_from_env("GS_QUERYSTRING_AUTH", False)
@@ -613,7 +629,7 @@ if OBSERVABILITY_ACTIVE:
 
 # Change this value if your application is running behind a proxy,
 # e.g. HTTP_CF_Connecting_IP for Cloudflare or X_FORWARDED_FOR
-REAL_IP_ENVIRON = os.environ.get("REAL_IP_ENVIRON", "REMOTE_ADDR")
+REAL_IP_ENVIRON = get_list(os.environ.get("REAL_IP_ENVIRON", "REMOTE_ADDR"))
 
 # Slugs for menus precreated in Django migrations
 DEFAULT_MENUS = {"top_menu_name": "navbar", "bottom_menu_name": "footer"}
@@ -662,7 +678,6 @@ FEDERATED_QUERY_MAX_ENTITIES = int(os.environ.get("FEDERATED_QUERY_MAX_ENTITIES"
 
 BUILTIN_PLUGINS = [
     "saleor.plugins.avatax.plugin.AvataxPlugin",
-    "saleor.plugins.vatlayer.plugin.VatlayerPlugin",
     "saleor.plugins.webhook.plugin.WebhookPlugin",
     "saleor.payment.gateways.dummy.plugin.DummyGatewayPlugin",
     "saleor.payment.gateways.dummy_credit_card.plugin.DummyCreditCardGatewayPlugin",
@@ -706,6 +721,11 @@ if (
 # for getting response from the server.
 WEBHOOK_TIMEOUT = 10
 WEBHOOK_SYNC_TIMEOUT = 20
+
+# Since we split checkout complete logic into two separate transactions, in order to
+# mimic stock lock, we apply short reservation for the stocks. The value represents
+# time of the reservation in seconds.
+RESERVE_DURATION = 45
 
 # Initialize a simple and basic Jaeger Tracing integration
 # for open-tracing if enabled.

@@ -15,6 +15,7 @@ from ...core.permissions import (
 from ...core.taxes import zero_taxed_money
 from ...core.tracing import traced_resolver
 from ...shipping.interface import ShippingMethodData
+from ...tax.utils import get_display_gross_prices
 from ...warehouse import models as warehouse_models
 from ...warehouse.reservations import is_reservation_enabled
 from ..account.dataloaders import AddressByIdLoader
@@ -26,6 +27,8 @@ from ..core.connection import CountableConnection
 from ..core.descriptions import (
     ADDED_IN_31,
     ADDED_IN_34,
+    ADDED_IN_38,
+    ADDED_IN_39,
     DEPRECATED_IN_3X_FIELD,
     PREVIEW_FEATURE,
 )
@@ -38,12 +41,18 @@ from ..discount.dataloaders import DiscountsByDateTimeLoader
 from ..giftcard.types import GiftCard
 from ..meta.types import ObjectWithMetadata
 from ..payment.types import TransactionItem
+from ..plugins.dataloaders import load_plugin_manager
 from ..product.dataloaders import (
     ProductTypeByProductIdLoader,
     ProductTypeByVariantIdLoader,
     ProductVariantByIdLoader,
 )
 from ..shipping.types import ShippingMethod
+from ..site.dataloaders import load_site_callback
+from ..tax.dataloaders import (
+    TaxConfigurationByChannelId,
+    TaxConfigurationPerCountryByTaxConfigurationIDLoader,
+)
 from ..utils import get_user_or_app_from_context
 from ..warehouse.dataloaders import StocksReservationsByCheckoutTokenLoader
 from ..warehouse.types import Warehouse
@@ -132,7 +141,10 @@ class CheckoutLine(ModelObjectType):
         )
 
     @staticmethod
+    @prevent_sync_event_circular_query
     def resolve_unit_price(root, info):
+        manager = load_plugin_manager(info.context)
+
         def with_checkout(checkout):
             discounts = DiscountsByDateTimeLoader(info.context).load(
                 info.context.request_time
@@ -153,7 +165,7 @@ class CheckoutLine(ModelObjectType):
                 for line_info in lines:
                     if line_info.line.pk == root.pk:
                         return calculations.checkout_line_unit_price(
-                            manager=info.context.plugins,
+                            manager=manager,
                             checkout_info=checkout_info,
                             lines=lines,
                             checkout_line_info=line_info,
@@ -213,7 +225,10 @@ class CheckoutLine(ModelObjectType):
 
     @staticmethod
     @traced_resolver
+    @prevent_sync_event_circular_query
     def resolve_total_price(root, info):
+        manager = load_plugin_manager(info.context)
+
         def with_checkout(checkout):
             discounts = DiscountsByDateTimeLoader(info.context).load(
                 info.context.request_time
@@ -226,15 +241,11 @@ class CheckoutLine(ModelObjectType):
             )
 
             def calculate_line_total_price(data):
-                (
-                    discounts,
-                    checkout_info,
-                    lines,
-                ) = data
+                (discounts, checkout_info, lines) = data
                 for line_info in lines:
                     if line_info.line.pk == root.pk:
                         return calculations.checkout_line_total(
-                            manager=info.context.plugins,
+                            manager=manager,
                             checkout_info=checkout_info,
                             lines=lines,
                             checkout_line_info=line_info,
@@ -242,13 +253,9 @@ class CheckoutLine(ModelObjectType):
                         )
                 return None
 
-            return Promise.all(
-                [
-                    discounts,
-                    checkout_info,
-                    lines,
-                ]
-            ).then(calculate_line_total_price)
+            return Promise.all([discounts, checkout_info, lines]).then(
+                calculate_line_total_price
+            )
 
         return (
             CheckoutByTokenLoader(info.context)
@@ -399,7 +406,6 @@ class Checkout(ModelObjectType):
         description="The shipping method related with checkout.",
         deprecation_reason=(f"{DEPRECATED_IN_3X_FIELD} Use `deliveryMethod` instead."),
     )
-
     delivery_method = graphene.Field(
         DeliveryMethod,
         description=(
@@ -408,10 +414,17 @@ class Checkout(ModelObjectType):
             + PREVIEW_FEATURE
         ),
     )
-
     subtotal_price = graphene.Field(
         TaxedMoney,
         description="The price of the checkout before shipping, with taxes included.",
+        required=True,
+    )
+    tax_exemption = graphene.Boolean(
+        description=(
+            "Returns True if checkout has to be exempt from taxes."
+            + ADDED_IN_38
+            + PREVIEW_FEATURE
+        ),
         required=True,
     )
     token = graphene.Field(UUID, description="The checkout's token.", required=True)
@@ -426,7 +439,6 @@ class Checkout(ModelObjectType):
     language_code = graphene.Field(
         LanguageCodeEnum, description="Checkout language code.", required=True
     )
-
     transactions = NonNullList(
         TransactionItem,
         description=(
@@ -435,6 +447,13 @@ class Checkout(ModelObjectType):
             + ADDED_IN_34
             + PREVIEW_FEATURE
         ),
+    )
+    display_gross_prices = graphene.Boolean(
+        description=(
+            "Determines whether checkout prices should include taxes when displayed "
+            "in a storefront." + ADDED_IN_39 + PREVIEW_FEATURE
+        ),
+        required=True,
     )
 
     class Meta:
@@ -525,12 +544,14 @@ class Checkout(ModelObjectType):
 
     @staticmethod
     @traced_resolver
-    # TODO: We should optimize it in/after PR#5819
+    @prevent_sync_event_circular_query
     def resolve_total_price(root: models.Checkout, info):
+        manager = load_plugin_manager(info.context)
+
         def calculate_total_price(data):
             address, lines, checkout_info, discounts = data
             taxed_total = calculations.calculate_checkout_total_with_gift_cards(
-                manager=info.context.plugins,
+                manager=manager,
                 checkout_info=checkout_info,
                 lines=lines,
                 address=address,
@@ -553,12 +574,14 @@ class Checkout(ModelObjectType):
 
     @staticmethod
     @traced_resolver
-    # TODO: We should optimize it in/after PR#5819
+    @prevent_sync_event_circular_query
     def resolve_subtotal_price(root: models.Checkout, info):
+        manager = load_plugin_manager(info.context)
+
         def calculate_subtotal_price(data):
             address, lines, checkout_info, discounts = data
             return calculations.checkout_subtotal(
-                manager=info.context.plugins,
+                manager=manager,
                 checkout_info=checkout_info,
                 lines=lines,
                 address=address,
@@ -574,18 +597,21 @@ class Checkout(ModelObjectType):
         discounts = DiscountsByDateTimeLoader(info.context).load(
             info.context.request_time
         )
+
         return Promise.all([address, lines, checkout_info, discounts]).then(
             calculate_subtotal_price
         )
 
     @staticmethod
     @traced_resolver
-    # TODO: We should optimize it in/after PR#5819
+    @prevent_sync_event_circular_query
     def resolve_shipping_price(root: models.Checkout, info):
+        manager = load_plugin_manager(info.context)
+
         def calculate_shipping_price(data):
             address, lines, checkout_info, discounts = data
             return calculations.checkout_shipping_price(
-                manager=info.context.plugins,
+                manager=manager,
                 checkout_info=checkout_info,
                 lines=lines,
                 address=address,
@@ -602,6 +628,7 @@ class Checkout(ModelObjectType):
         discounts = DiscountsByDateTimeLoader(info.context).load(
             info.context.request_time
         )
+
         return Promise.all([address, lines, checkout_info, discounts]).then(
             calculate_shipping_price
         )
@@ -635,7 +662,8 @@ class Checkout(ModelObjectType):
     @staticmethod
     @prevent_sync_event_circular_query
     def resolve_available_payment_gateways(root: models.Checkout, info):
-        return info.context.plugins.list_payment_gateways(
+        manager = load_plugin_manager(info.context)
+        return manager.list_payment_gateways(
             currency=root.currency, checkout=root, channel_slug=root.channel.slug
         )
 
@@ -669,8 +697,9 @@ class Checkout(ModelObjectType):
 
     @staticmethod
     @traced_resolver
-    def resolve_stock_reservation_expires(root: models.Checkout, info):
-        if not is_reservation_enabled(info.context.site.settings):
+    @load_site_callback
+    def resolve_stock_reservation_expires(root: models.Checkout, info, site):
+        if not is_reservation_enabled(site.settings):
             return None
 
         def get_oldest_stock_reservation_expiration_date(reservations):
@@ -691,6 +720,33 @@ class Checkout(ModelObjectType):
     )
     def resolve_transactions(root: models.Checkout, info):
         return TransactionItemsByCheckoutIDLoader(info.context).load(root.pk)
+
+    @staticmethod
+    def resolve_display_gross_prices(root: models.Checkout, info):
+        tax_config = TaxConfigurationByChannelId(info.context).load(root.channel_id)
+        country_code = root.get_country()
+
+        def load_tax_country_exceptions(tax_config):
+            tax_configs_per_country = (
+                TaxConfigurationPerCountryByTaxConfigurationIDLoader(info.context).load(
+                    tax_config.id
+                )
+            )
+
+            def calculate_display_gross_prices(tax_configs_per_country):
+                tax_config_country = next(
+                    (
+                        tc
+                        for tc in tax_configs_per_country
+                        if tc.country.code == country_code
+                    ),
+                    None,
+                )
+                return get_display_gross_prices(tax_config, tax_config_country)
+
+            return tax_configs_per_country.then(calculate_display_gross_prices)
+
+        return tax_config.then(load_tax_country_exceptions)
 
 
 class CheckoutCountableConnection(CountableConnection):

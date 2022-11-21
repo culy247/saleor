@@ -3,6 +3,7 @@ from collections import defaultdict
 from typing import DefaultDict, Iterable, List, Optional, Tuple
 from uuid import UUID
 
+from django.contrib.sites.models import Site
 from django.db.models import Exists, OuterRef, Q
 from django.db.models.aggregates import Sum
 from django.db.models.functions import Coalesce
@@ -21,6 +22,7 @@ from ...warehouse.models import (
 )
 from ...warehouse.reservations import is_reservation_enabled
 from ..core.dataloaders import DataLoader
+from ..site.dataloaders import get_site_promise
 
 CountryCode = Optional[str]
 VariantIdCountryCodeChannelSlug = Tuple[int, CountryCode, str]
@@ -40,7 +42,7 @@ class AvailableQuantityByProductVariantIdCountryCodeAndChannelSlugLoader(
 
     def batch_load(self, keys):
         # Split the list of keys by country first. A typical query will only touch
-        # a handful of unique countries but may access thousands of product variants
+        # a handful of unique countries but may access thousands of product variants,
         # so it's cheaper to execute one query per country.
         variants_by_country_and_channel: DefaultDict[
             Tuple[CountryCode, str], List[int]
@@ -54,10 +56,15 @@ class AvailableQuantityByProductVariantIdCountryCodeAndChannelSlugLoader(
         quantity_by_variant_and_country: DefaultDict[
             VariantIdCountryCodeChannelSlug, int
         ] = defaultdict(int)
+
+        site = None
+        if variants_by_country_and_channel:
+            site = get_site_promise(self.context).get()
+
         for key, variant_ids in variants_by_country_and_channel.items():
             country_code, channel_slug = key
             quantities = self.batch_load_quantities_by_country(
-                country_code, channel_slug, variant_ids
+                country_code, channel_slug, variant_ids, site
             )
             for variant_id, quantity in quantities:
                 quantity_by_variant_and_country[
@@ -71,13 +78,15 @@ class AvailableQuantityByProductVariantIdCountryCodeAndChannelSlugLoader(
         country_code: Optional[CountryCode],
         channel_slug: Optional[str],
         variant_ids: Iterable[int],
+        site: Site,
     ) -> Iterable[Tuple[int, int]]:
         # get stocks only for warehouses assigned to the shipping zones
         # that are available in the given channel
-        stocks = Stock.objects.using(self.database_connection_name).filter(
-            product_variant_id__in=variant_ids
+        stocks = (
+            Stock.objects.all()
+            .using(self.database_connection_name)
+            .filter(product_variant_id__in=variant_ids)
         )
-        additional_warehouse_filter = True if country_code or channel_slug else False
 
         warehouse_shipping_zones = self.get_warehouse_shipping_zones(
             country_code, channel_slug
@@ -91,11 +100,11 @@ class AvailableQuantityByProductVariantIdCountryCodeAndChannelSlugLoader(
             warehouse_shipping_zones_map[warehouse_shipping_zone.warehouse_id].append(
                 warehouse_shipping_zone.shippingzone_id
             )
-        if additional_warehouse_filter:
-            stocks = stocks.filter(
-                Q(warehouse_id__in=warehouse_shipping_zones_map.keys())
-                | Q(warehouse_id__in=cc_warehouses.values("id"))
-            )
+
+        stocks = stocks.filter(
+            Q(warehouse_id__in=warehouse_shipping_zones_map.keys())
+            | Q(warehouse_id__in=cc_warehouses.values("id"))
+        )
 
         stocks = stocks.annotate_available_quantity()
 
@@ -120,7 +129,7 @@ class AvailableQuantityByProductVariantIdCountryCodeAndChannelSlugLoader(
         # Return the quantities after capping them at the maximum quantity allowed in
         # checkout. This prevent users from tracking the store's precise stock levels.
         global_quantity_limit = (
-            self.context.site.settings.limit_quantity_per_checkout  # type: ignore
+            site.settings.limit_quantity_per_checkout  # type: ignore
         )
         return [
             (
@@ -207,7 +216,8 @@ class AvailableQuantityByProductVariantIdCountryCodeAndChannelSlugLoader(
     def prepare_stocks_reservations_map(self, variant_ids):
         """Prepare stock id to quantity reserved map for provided variant ids."""
         stocks_reservations = defaultdict(int)
-        if is_reservation_enabled(self.context.site.settings):  # type: ignore
+        site = get_site_promise(self.context).get()
+        if is_reservation_enabled(site.settings):  # type: ignore
             # Can't do second annotation on same queryset because it made
             # available_quantity annotated value incorrect thanks to how
             # Django's ORM builds SQLs with annotations
@@ -353,8 +363,10 @@ class StocksWithAvailableQuantityByProductVariantIdCountryCodeAndChannelLoader(
         channel_slug: Optional[str],
         variant_ids: Iterable[int],
     ) -> Iterable[Tuple[int, List[Stock]]]:
-        stocks = Stock.objects.using(self.database_connection_name).filter(
-            product_variant_id__in=variant_ids
+        stocks = (
+            Stock.objects.all()
+            .using(self.database_connection_name)
+            .filter(product_variant_id__in=variant_ids)
         )
         if country_code:
             stocks = stocks.filter(
@@ -478,8 +490,8 @@ class WarehouseByIdLoader(DataLoader):
     context_key = "warehouse_by_id"
 
     def batch_load(self, keys: Iterable[UUID]) -> List[Optional[Warehouse]]:
-        warehouses = Warehouse.objects.using(self.database_connection_name).in_bulk(
-            keys
+        warehouses = (
+            Warehouse.objects.all().using(self.database_connection_name).in_bulk(keys)
         )
         return [warehouses.get(warehouse_uuid) for warehouse_uuid in keys]
 

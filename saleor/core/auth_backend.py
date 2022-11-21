@@ -3,6 +3,7 @@ from django.contrib.auth.backends import ModelBackend
 
 from ..account.models import User
 from ..graphql.account.dataloaders import UserByEmailLoader
+from ..graphql.plugins.dataloaders import AnonymousPluginManagerLoader
 from .auth import get_token_from_request
 from .jwt import (
     JWT_ACCESS_TYPE,
@@ -43,11 +44,9 @@ class JSONWebTokenBackend(ModelBackend):
 
         perm_cache_name = "_effective_permissions_cache"
         if not getattr(user_obj, perm_cache_name, None):
-            perms = getattr(self, "_get_%s_permissions" % from_name)(user_obj)
+            perms = getattr(self, f"_get_{from_name}_permissions")(user_obj)
             perms = perms.values_list("content_type__app_label", "codename").order_by()
-            setattr(
-                user_obj, perm_cache_name, {"%s.%s" % (ct, name) for ct, name in perms}
-            )
+            setattr(user_obj, perm_cache_name, {f"{ct}.{name}" for ct, name in perms})
         return getattr(user_obj, perm_cache_name)
 
 
@@ -55,7 +54,8 @@ class PluginBackend(JSONWebTokenBackend):
     def authenticate(self, request=None, **kwargs):
         if request is None:
             return None
-        return request.plugins.authenticate_user(request)
+        manager = AnonymousPluginManagerLoader(request).load("Anonymous").get()
+        return manager.authenticate_user(request)
 
 
 def load_user_from_request(request):
@@ -75,9 +75,13 @@ def load_user_from_request(request):
 
     user = UserByEmailLoader(request).load(payload["email"]).get()
     user_jwt_token = payload.get("token")
-    if not user_jwt_token or not user:
+    if not user_jwt_token:
         raise jwt.InvalidTokenError(
             "Invalid token. Create new one by using tokenCreate mutation."
+        )
+    elif not user:
+        raise jwt.InvalidTokenError(
+            "Invalid token. User does not exist or is inactive."
         )
     if user.jwt_token_key != user_jwt_token:
         raise jwt.InvalidTokenError(

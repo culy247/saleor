@@ -9,7 +9,7 @@ from ...account.models import User
 from ...core.permissions import GiftcardPermissions
 from ...core.tracing import traced_atomic_transaction
 from ...core.utils.promo_code import generate_promo_code
-from ...core.utils.validators import is_date_in_future, user_is_valid
+from ...core.utils.validators import is_date_in_future
 from ...giftcard import events, models
 from ...giftcard.error_codes import GiftCardErrorCode
 from ...giftcard.notifications import send_gift_card_notification
@@ -25,6 +25,7 @@ from ..core.scalars import PositiveDecimal
 from ..core.types import GiftCardError, NonNullList, PriceInput
 from ..core.utils import validate_required_string_field
 from ..core.validators import validate_price_precision
+from ..plugins.dataloaders import load_plugin_manager
 from ..utils.validators import check_for_duplicates
 from .types import GiftCard, GiftCardEvent
 
@@ -165,7 +166,7 @@ class GiftCardCreate(ModelMutation):
     @staticmethod
     def set_created_by_user(cleaned_input, info):
         user = info.context.user
-        if user_is_valid(user):
+        if user:
             cleaned_input["created_by"] = user
             cleaned_input["created_by_email"] = user.email
         cleaned_input["app"] = load_app(info.context)
@@ -226,6 +227,7 @@ class GiftCardCreate(ModelMutation):
             user=user,
             app=app,
         )
+        manager = load_plugin_manager(info.context)
         if note := cleaned_input.get("note"):
             events.gift_card_note_added_event(
                 gift_card=instance, user=user, app=app, message=note
@@ -237,11 +239,11 @@ class GiftCardCreate(ModelMutation):
                 cleaned_input["customer_user"],
                 email,
                 instance,
-                info.context.plugins,
+                manager,
                 channel_slug=cleaned_input["channel"],
                 resending=False,
             )
-        info.context.plugins.gift_card_created(instance)
+        cls.call_event(manager.gift_card_created, instance)
 
     @staticmethod
     def assign_gift_card_tags(instance: models.GiftCard, tags_values: Iterable[str]):
@@ -256,12 +258,12 @@ class GiftCardCreate(ModelMutation):
         instance.tags.add(*add_tags_instances)
 
     @classmethod
-    @traced_atomic_transaction()
     def _save_m2m(cls, info, instance, cleaned_data):
-        super()._save_m2m(info, instance, cleaned_data)
-        tags = cleaned_data.get("add_tags")
-        if tags:
-            cls.assign_gift_card_tags(instance, tags)
+        with traced_atomic_transaction():
+            super()._save_m2m(info, instance, cleaned_data)
+            tags = cleaned_data.get("add_tags")
+            if tags:
+                cls.assign_gift_card_tags(instance, tags)
 
 
 class GiftCardUpdate(GiftCardCreate):
@@ -339,8 +341,8 @@ class GiftCardUpdate(GiftCardCreate):
             )
         if tags_updated:
             events.gift_card_tags_updated_event(instance, old_tags, user, app)
-
-        info.context.plugins.gift_card_updated(instance)
+        manager = load_plugin_manager(info.context)
+        cls.call_event(manager.gift_card_updated, instance)
         return cls.success_response(instance)
 
     @classmethod
@@ -350,18 +352,18 @@ class GiftCardUpdate(GiftCardCreate):
         return cleaned_input
 
     @classmethod
-    @traced_atomic_transaction()
     def _save_m2m(cls, info, instance, cleaned_data):
-        super()._save_m2m(info, instance, cleaned_data)
-        remove_tags = cleaned_data.get("remove_tags")
-        if remove_tags:
-            remove_tags = {tag.lower() for tag in remove_tags}
-            remove_tags_instances = models.GiftCardTag.objects.filter(
-                name__in=remove_tags
-            )
-            instance.tags.remove(*remove_tags_instances)
-            # delete tags without gift card assigned
-            remove_tags_instances.filter(gift_cards__isnull=True).delete()
+        with traced_atomic_transaction():
+            super()._save_m2m(info, instance, cleaned_data)
+            remove_tags = cleaned_data.get("remove_tags")
+            if remove_tags:
+                remove_tags = {tag.lower() for tag in remove_tags}
+                remove_tags_instances = models.GiftCardTag.objects.filter(
+                    name__in=remove_tags
+                )
+                instance.tags.remove(*remove_tags_instances)
+                # delete tags without gift card assigned
+                remove_tags_instances.filter(gift_cards__isnull=True).delete()
 
 
 class GiftCardDelete(ModelDeleteMutation):
@@ -378,7 +380,8 @@ class GiftCardDelete(ModelDeleteMutation):
 
     @classmethod
     def post_save_action(cls, info, instance, cleaned_input):
-        info.context.plugins.gift_card_deleted(instance)
+        manager = load_plugin_manager(info.context)
+        cls.call_event(manager.gift_card_deleted, instance)
 
 
 class GiftCardDeactivate(BaseMutation):
@@ -409,7 +412,8 @@ class GiftCardDeactivate(BaseMutation):
                 user=info.context.user,
                 app=app,
             )
-        info.context.plugins.gift_card_status_changed(gift_card)
+        manager = load_plugin_manager(info.context)
+        cls.call_event(manager.gift_card_status_changed, gift_card)
         return GiftCardDeactivate(gift_card=gift_card)
 
 
@@ -442,7 +446,8 @@ class GiftCardActivate(BaseMutation):
                 user=info.context.user,
                 app=app,
             )
-        info.context.plugins.gift_card_status_changed(gift_card)
+        manager = load_plugin_manager(info.context)
+        cls.call_event(manager.gift_card_status_changed, gift_card)
         return GiftCardActivate(gift_card=gift_card)
 
 
@@ -509,16 +514,17 @@ class GiftCardResend(BaseMutation):
         target_email = cls.get_target_email(data, gift_card)
         customer_user = cls.get_customer_user(target_email)
         user = info.context.user
-        if not user_is_valid(user):
+        if not user:
             user = None
         app = load_app(info.context)
+        manager = load_plugin_manager(info.context)
         send_gift_card_notification(
             user,
             app,
             customer_user,
             target_email,
             gift_card,
-            info.context.plugins,
+            manager,
             channel_slug=data.get("channel"),
             resending=True,
         )
@@ -573,5 +579,6 @@ class GiftCardAddNote(BaseMutation):
             app=app,
             message=cleaned_input["message"],
         )
-        info.context.plugins.gift_card_updated(gift_card)
+        manager = load_plugin_manager(info.context)
+        cls.call_event(manager.gift_card_updated, gift_card)
         return GiftCardAddNote(gift_card=gift_card, event=event)

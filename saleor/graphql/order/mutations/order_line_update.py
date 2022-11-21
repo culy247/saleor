@@ -1,6 +1,5 @@
 import graphene
 from django.core.exceptions import ValidationError
-from django.db import transaction
 
 from ....core.exceptions import InsufficientStock
 from ....core.permissions import OrderPermissions
@@ -16,6 +15,7 @@ from ....order.utils import (
 from ...app.dataloaders import load_app
 from ...core.mutations import ModelMutation
 from ...core.types import OrderError
+from ...plugins.dataloaders import load_plugin_manager
 from ..types import Order, OrderLine
 from .draft_order_create import OrderLineInput
 from .utils import EditableOrderValidationMixin, get_webhook_handler_by_order_status
@@ -57,42 +57,42 @@ class OrderLineUpdate(EditableOrderValidationMixin, ModelMutation):
         return cleaned_input
 
     @classmethod
-    @traced_atomic_transaction()
     def save(cls, info, instance, cleaned_input):
-        manager = info.context.plugins
+        manager = load_plugin_manager(info.context)
         warehouse_pk = (
             instance.allocations.first().stock.warehouse.pk
             if instance.order.is_unconfirmed()
             else None
         )
-        line_info = OrderLineInfo(
-            line=instance,
-            quantity=instance.quantity,
-            variant=instance.variant,
-            warehouse_pk=warehouse_pk,
-        )
         app = load_app(info.context)
-        try:
-            change_order_line_quantity(
-                info.context.user,
-                app,
-                line_info,
-                instance.old_quantity,
-                instance.quantity,
-                instance.order.channel,
-                manager,
+        with traced_atomic_transaction():
+            line_info = OrderLineInfo(
+                line=instance,
+                quantity=instance.quantity,
+                variant=instance.variant,
+                warehouse_pk=warehouse_pk,
             )
-        except InsufficientStock:
-            raise ValidationError(
-                "Cannot set new quantity because of insufficient stock.",
-                code=OrderErrorCode.INSUFFICIENT_STOCK,
-            )
-        invalidate_order_prices(instance.order)
-        recalculate_order_weight(instance.order)
-        instance.order.save(update_fields=["should_refresh_prices", "weight"])
+            try:
+                change_order_line_quantity(
+                    info.context.user,
+                    app,
+                    line_info,
+                    instance.old_quantity,
+                    instance.quantity,
+                    instance.order.channel,
+                    manager,
+                )
+            except InsufficientStock:
+                raise ValidationError(
+                    "Cannot set new quantity because of insufficient stock.",
+                    code=OrderErrorCode.INSUFFICIENT_STOCK,
+                )
+            invalidate_order_prices(instance.order)
+            recalculate_order_weight(instance.order)
+            instance.order.save(update_fields=["should_refresh_prices", "weight"])
 
-        func = get_webhook_handler_by_order_status(instance.order.status, info)
-        transaction.on_commit(lambda: func(instance.order))
+            func = get_webhook_handler_by_order_status(instance.order.status, manager)
+            cls.call_event(func, instance.order)
 
     @classmethod
     def success_response(cls, instance):

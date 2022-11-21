@@ -8,7 +8,6 @@ from uuid import uuid4
 from django.conf import settings
 from django.core.validators import MinValueValidator
 from django.db import models
-from django.db.models.deletion import SET_NULL
 from django.utils import timezone
 from django.utils.encoding import smart_str
 from django_countries.fields import Country, CountryField
@@ -24,7 +23,6 @@ from ..giftcard.models import GiftCard
 from ..shipping.models import ShippingMethod
 
 if TYPE_CHECKING:
-    # flake8: noqa
     from django_measurement import Weight
 
     from ..payment.models import Payment
@@ -143,7 +141,7 @@ class Checkout(ModelWithMetadata):
     discount_amount = models.DecimalField(
         max_digits=settings.DEFAULT_MAX_DIGITS,
         decimal_places=settings.DEFAULT_DECIMAL_PLACES,
-        default=0,
+        default=Decimal("0.0"),
     )
     discount = MoneyField(amount_field="discount_amount", currency_field="currency")
     discount_name = models.CharField(max_length=255, blank=True, null=True)
@@ -159,12 +157,15 @@ class Checkout(ModelWithMetadata):
         max_length=35, choices=settings.LANGUAGES, default=settings.LANGUAGE_CODE
     )
 
+    tax_exemption = models.BooleanField(default=False)
+
     class Meta(ModelWithMetadata.Meta):
         ordering = ("-last_change", "pk")
         permissions = (
             (CheckoutPermissions.MANAGE_CHECKOUTS.codename, "Manage checkouts"),
             (CheckoutPermissions.HANDLE_CHECKOUTS.codename, "Handle checkouts"),
             (CheckoutPermissions.HANDLE_TAXES.codename, "Handle taxes"),
+            (CheckoutPermissions.MANAGE_TAXES.codename, "Manage taxes"),
         )
 
     def __iter__(self):
