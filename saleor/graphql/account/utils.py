@@ -1,171 +1,24 @@
-from collections import defaultdict
-from typing import TYPE_CHECKING, List, Optional, Set, Union
+from typing import TYPE_CHECKING, Optional, Union
 
-import graphene
-from django.contrib.auth.models import Group
 from django.contrib.postgres.aggregates import ArrayAgg
-from django.core.exceptions import ValidationError
 from django.db.models import Q, Value
 from django.db.models.functions import Concat
 from graphene.utils.str_converters import to_camel_case
 
-from ...account import events as account_events
-from ...account.error_codes import AccountErrorCode
+from ...account.models import Group, User
 from ...core.exceptions import PermissionDenied
-from ...core.permissions import (
-    AccountPermissions,
-    AuthorizationFilters,
-    has_one_of_permissions,
+from ...permission.auth_filters import AuthorizationFilters
+from ...permission.enums import AccountPermissions
+from ...permission.utils import has_one_of_permissions
+from .dataloaders import (
+    AccessibleChannelsByGroupIdLoader,
+    AccessibleChannelsByUserIdLoader,
 )
-from ..app.dataloaders import load_app
 
 if TYPE_CHECKING:
     from django.db.models import QuerySet
 
-    from ...account.models import User
     from ...app.models import App
-
-
-class UserDeleteMixin:
-    class Meta:
-        abstract = True
-
-    @classmethod
-    def clean_instance(cls, info, instance):
-        user = info.context.user
-        if instance == user:
-            raise ValidationError(
-                {
-                    "id": ValidationError(
-                        "You cannot delete your own account.",
-                        code=AccountErrorCode.DELETE_OWN_ACCOUNT,
-                    )
-                }
-            )
-        elif instance.is_superuser:
-            raise ValidationError(
-                {
-                    "id": ValidationError(
-                        "Cannot delete this account.",
-                        code=AccountErrorCode.DELETE_SUPERUSER_ACCOUNT,
-                    )
-                }
-            )
-
-
-class CustomerDeleteMixin(UserDeleteMixin):
-    class Meta:
-        abstract = True
-
-    @classmethod
-    def clean_instance(cls, info, instance):
-        super().clean_instance(info, instance)
-        if instance.is_staff:
-            raise ValidationError(
-                {
-                    "id": ValidationError(
-                        "Cannot delete a staff account.",
-                        code=AccountErrorCode.DELETE_STAFF_ACCOUNT,
-                    )
-                }
-            )
-
-    @classmethod
-    def post_process(cls, info, deleted_count=1):
-        app = load_app(info.context)
-        account_events.customer_deleted_event(
-            staff_user=info.context.user,
-            app=app,
-            deleted_count=deleted_count,
-        )
-
-
-class StaffDeleteMixin(UserDeleteMixin):
-    class Meta:
-        abstract = True
-
-    @classmethod
-    def check_permissions(cls, context, permissions=None):
-        if load_app(context):
-            raise PermissionDenied(
-                message="Apps are not allowed to perform this mutation."
-            )
-        return super().check_permissions(context, permissions)
-
-    @classmethod
-    def clean_instance(cls, info, instance):
-        errors = defaultdict(list)
-
-        requestor = info.context.user
-
-        cls.check_if_users_can_be_deleted(info, [instance], "id", errors)
-        cls.check_if_requestor_can_manage_users(requestor, [instance], "id", errors)
-        cls.check_if_removing_left_not_manageable_permissions(
-            requestor, [instance], "id", errors
-        )
-        if errors:
-            raise ValidationError(errors)
-
-    @classmethod
-    def check_if_users_can_be_deleted(cls, info, instances, field, errors):
-        """Check if only staff users will be deleted. Cannot delete non-staff users."""
-        not_staff_users = set()
-        for user in instances:
-            if not user.is_staff:
-                not_staff_users.add(user)
-            try:
-                super().clean_instance(info, user)
-            except ValidationError as error:
-                errors["ids"].append(error)
-
-        if not_staff_users:
-            user_pks = [
-                graphene.Node.to_global_id("User", user.pk) for user in not_staff_users
-            ]
-            msg = "Cannot delete a non-staff users."
-            code = AccountErrorCode.DELETE_NON_STAFF_USER
-            params = {"users": user_pks}
-            errors[field].append(ValidationError(msg, code=code, params=params))
-
-    @classmethod
-    def check_if_requestor_can_manage_users(cls, requestor, instances, field, errors):
-        """Requestor can't manage users with wider scope of permissions."""
-        if requestor.is_superuser:
-            return
-        out_of_scope_users = get_out_of_scope_users(requestor, instances)
-        if out_of_scope_users:
-            user_pks = [
-                graphene.Node.to_global_id("User", user.pk)
-                for user in out_of_scope_users
-            ]
-            msg = "You can't manage this users."
-            code = AccountErrorCode.OUT_OF_SCOPE_USER.value
-            params = {"users": user_pks}
-            error = ValidationError(msg, code=code, params=params)
-            errors[field] = error
-
-    @classmethod
-    def check_if_removing_left_not_manageable_permissions(
-        cls, requestor, users, field, errors
-    ):
-        """Check if after removing users all permissions will be manageable.
-
-        After removing users, for each permission, there should be at least one
-        active staff member who can manage it (has both “manage staff” and
-        this permission).
-        """
-        if requestor.is_superuser:
-            return
-        permissions = get_not_manageable_permissions_when_deactivate_or_remove_users(
-            users
-        )
-        if permissions:
-            # add error
-            msg = "Users cannot be removed, some of permissions will not be manageable."
-            code = AccountErrorCode.LEFT_NOT_MANAGEABLE_PERMISSION.value
-            params = {"permissions": permissions}
-            error = ValidationError(msg, code=code, params=params)
-            errors[field] = error
 
 
 def get_required_fields_camel_case(required_fields: set) -> set:
@@ -200,8 +53,8 @@ def get_user_permissions(user: "User") -> "QuerySet":
 
 
 def get_out_of_scope_permissions(
-    requestor: Union["User", "App", None], permissions: List[str]
-) -> List[str]:
+    requestor: Union["User", "App", None], permissions: list[str]
+) -> list[str]:
     """Return permissions that the requestor hasn't got."""
     missing_permissions = []
     for perm in permissions:
@@ -210,7 +63,7 @@ def get_out_of_scope_permissions(
     return missing_permissions
 
 
-def get_out_of_scope_users(root_user: "User", users: List["User"]):
+def get_out_of_scope_users(root_user: "User", users: list["User"]):
     """Return users whose permission scope is wider than the given user."""
     out_of_scope_users = []
     for user in users:
@@ -220,26 +73,46 @@ def get_out_of_scope_users(root_user: "User", users: List["User"]):
     return out_of_scope_users
 
 
-def can_user_manage_group(user: "User", group: Group) -> bool:
+def can_user_manage_group(info, user: "User", group: Group) -> bool:
+    """User can't manage a group with permission or channel that is out of his scope."""
+    return can_user_manage_group_permissions(
+        user, group
+    ) and can_user_manage_group_channels(info, user, group)
+
+
+def can_user_manage_group_permissions(user: "User", group: Group) -> bool:
     """User can't manage a group with permission that is out of the user's scope."""
     permissions = get_group_permission_codes(group)
     return user.has_perms(permissions)
 
 
-def can_manage_app(requestor: Union["User", "App"], app: "App") -> bool:
+def can_user_manage_group_channels(info, user: "User", group: Group) -> bool:
+    """User can't manage a group with channel that is out of the user's scope."""
+    if user.is_superuser:
+        return True
+    accessible_channels = set(get_user_accessible_channels(info, user))
+    group_channels = set(
+        AccessibleChannelsByGroupIdLoader(info.context).load(group.id).get()
+    )
+    return not bool(group_channels - accessible_channels)
+
+
+def can_manage_app(requestor: Union["User", "App", None], app: "App") -> bool:
     """Requestor can't manage app with wider scope of permissions."""
     permissions = app.get_permissions()
-    return bool(requestor) and requestor.has_perms(permissions)
+    if not requestor:
+        return False
+    return requestor.has_perms(permissions)
 
 
 def get_group_permission_codes(group: Group) -> "QuerySet":
     """Return group permissions in the format '<app label>.<permission codename>'."""
     return group.permissions.annotate(
-        formated_codename=Concat("content_type__app_label", Value("."), "codename")
-    ).values_list("formated_codename", flat=True)
+        formatted_codename=Concat("content_type__app_label", Value("."), "codename")
+    ).values_list("formatted_codename", flat=True)  # type: ignore[misc]
 
 
-def get_groups_which_user_can_manage(user: "User") -> List[Group]:
+def get_groups_which_user_can_manage(user: "User") -> list[Group]:
     """Return groups which user can manage."""
     if not user.is_staff:
         return []
@@ -249,7 +122,7 @@ def get_groups_which_user_can_manage(user: "User") -> List[Group]:
 
     groups = Group.objects.all().annotate(group_perms=ArrayAgg("permissions"))
 
-    editable_groups: List[Group] = []
+    editable_groups: list[Group] = []
     for group in groups.iterator():
         out_of_scope_permissions = set(group.group_perms) - user_permission_pks
         out_of_scope_permissions.discard(None)
@@ -259,7 +132,7 @@ def get_groups_which_user_can_manage(user: "User") -> List[Group]:
     return editable_groups
 
 
-def get_not_manageable_permissions_when_deactivate_or_remove_users(users: List["User"]):
+def get_not_manageable_permissions_when_deactivate_or_remove_users(users: list["User"]):
     """Return permissions that cannot be managed after deactivating or removing users.
 
     After removing or deactivating users, for each user permission which he can manage,
@@ -304,7 +177,7 @@ def get_not_manageable_permissions_when_deactivate_or_remove_users(users: List["
 
 
 def get_not_manageable_permissions_after_removing_perms_from_group(
-    group: Group, permissions: List["str"]
+    group: Group, permissions: list["str"]
 ):
     """Return permissions that cannot be managed after removing permissions from group.
 
@@ -319,7 +192,7 @@ def get_not_manageable_permissions_after_removing_perms_from_group(
 
 
 def get_not_manageable_permissions_after_removing_users_from_group(
-    group: Group, users: List["User"]
+    group: Group, users: list["User"]
 ):
     """Return permissions that cannot be managed after removing users from group.
 
@@ -363,7 +236,7 @@ def get_not_manageable_permissions_after_group_deleting(group):
 
 def get_not_manageable_permissions(
     groups_data: dict,
-    not_manageable_permissions: Set[str],
+    not_manageable_permissions: set[str],
 ):
     # get users from groups with manage staff and look for not_manageable_permissions
     # if any of not_manageable_permissions is found it is removed from set
@@ -429,7 +302,7 @@ def get_group_to_permissions_and_users_mapping():
 
 def get_users_and_look_for_permissions_in_groups_with_manage_staff(
     groups_data: dict,
-    permissions_to_find: Set[str],
+    permissions_to_find: set[str],
 ):
     """Search for permissions in groups with manage staff and return their users.
 
@@ -439,7 +312,7 @@ def get_users_and_look_for_permissions_in_groups_with_manage_staff(
         permissions_to_find: searched permissions
 
     """
-    users_with_manage_staff: Set[int] = set()
+    users_with_manage_staff: set[int] = set()
     for data in groups_data.values():
         permissions = data["permissions"]
         users = data["users"]
@@ -457,8 +330,8 @@ def get_users_and_look_for_permissions_in_groups_with_manage_staff(
 
 def look_for_permission_in_users_with_manage_staff(
     groups_data: dict,
-    users_to_check: Set[int],
-    permissions_to_find: Set[str],
+    users_to_check: set[int],
+    permissions_to_find: set[str],
 ):
     """Search for permissions in user with manage staff groups.
 
@@ -480,7 +353,7 @@ def look_for_permission_in_users_with_manage_staff(
 
 
 def is_owner_or_has_one_of_perms(
-    requestor: Union["User", "App"], owner: Optional[Union["User", "App"]], *perms
+    requestor: Union["User", "App", None], owner: Optional[Union["User", "App"]], *perms
 ) -> bool:
     """Check if requestor can access data.
 
@@ -495,7 +368,7 @@ def is_owner_or_has_one_of_perms(
 
 
 def check_is_owner_or_has_one_of_perms(
-    requestor: Union["User", "App"], owner: Optional["User"], *perms
+    requestor: Union["User", "App", None], owner: Optional["User"], *perms
 ) -> None:
     """Confirm that requestor can access data, raise `PermissionDenied` otherwise.
 
@@ -510,3 +383,11 @@ def check_is_owner_or_has_one_of_perms(
     """
     if not is_owner_or_has_one_of_perms(requestor, owner, *perms):
         raise PermissionDenied(permissions=list(perms) + [AuthorizationFilters.OWNER])
+
+
+def get_user_accessible_channels(info, user: Optional[User]):
+    return (
+        (AccessibleChannelsByUserIdLoader(info.context).load(user.id).get())
+        if user is not None
+        else []
+    )

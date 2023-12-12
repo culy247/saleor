@@ -2,17 +2,37 @@ import json
 from decimal import Decimal
 from functools import partial
 from unittest import mock
+from unittest.mock import patch
 
 import pytest
 from django.http import HttpResponseNotFound, JsonResponse
+from django.test import override_settings
 from prices import Money, TaxedMoney
 
+from ...channel import TransactionFlowStrategy
 from ...checkout.fetch import fetch_checkout_info, fetch_checkout_lines
 from ...core.prices import quantize_price
 from ...core.taxes import TaxType, zero_money, zero_taxed_money
-from ...discount.utils import fetch_catalogue_info
-from ...graphql.discount.mutations.utils import convert_catalogue_info_to_global_ids
-from ...payment.interface import PaymentGateway
+from ...graphql.discount.utils import convert_migrated_sale_predicate_to_catalogue_info
+from ...payment import TokenizedPaymentFlow
+from ...payment.interface import (
+    ListStoredPaymentMethodsRequestData,
+    PaymentGateway,
+    PaymentGatewayData,
+    PaymentGatewayInitializeTokenizationRequestData,
+    PaymentGatewayInitializeTokenizationResponseData,
+    PaymentGatewayInitializeTokenizationResult,
+    PaymentMethodInitializeTokenizationRequestData,
+    PaymentMethodProcessTokenizationRequestData,
+    PaymentMethodTokenizationResponseData,
+    PaymentMethodTokenizationResult,
+    StoredPaymentMethodRequestDeleteData,
+    StoredPaymentMethodRequestDeleteResponseData,
+    StoredPaymentMethodRequestDeleteResult,
+    TransactionProcessActionData,
+    TransactionSessionData,
+    TransactionSessionResult,
+)
 from ...product.models import Product
 from ..base_plugin import ExternalAccessTokens
 from ..manager import PluginsManager, get_plugins_manager
@@ -145,61 +165,65 @@ def test_manager_get_active_plugins_without_channel_slug(
 
 
 @pytest.mark.parametrize(
-    "plugins, total_amount",
+    ("plugins", "total_amount"),
     [(["saleor.plugins.tests.sample_plugins.PluginSample"], "1.0"), ([], "15.0")],
 )
 def test_manager_calculates_checkout_total(
-    checkout_with_item, discount_info, plugins, total_amount
+    checkout_with_item_on_promotion, plugins, total_amount
 ):
-    currency = checkout_with_item.currency
+    # given
+    checkout = checkout_with_item_on_promotion
+    currency = checkout.currency
     expected_total = Money(total_amount, currency)
     manager = PluginsManager(plugins=plugins)
-    lines, _ = fetch_checkout_lines(checkout_with_item)
-    checkout_info = fetch_checkout_info(
-        checkout_with_item, lines, [discount_info], manager
-    )
-    taxed_total = manager.calculate_checkout_total(
-        checkout_info, lines, None, [discount_info]
-    )
+    lines, _ = fetch_checkout_lines(checkout)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
+
+    # when
+    taxed_total = manager.calculate_checkout_total(checkout_info, lines, None)
+
+    # then
     assert TaxedMoney(expected_total, expected_total) == taxed_total
 
 
 @pytest.mark.parametrize(
-    "plugins, subtotal_amount",
+    ("plugins", "subtotal_amount"),
     [(["saleor.plugins.tests.sample_plugins.PluginSample"], "1.0"), ([], "15.0")],
 )
 def test_manager_calculates_checkout_subtotal(
-    checkout_with_item, discount_info, plugins, subtotal_amount
+    checkout_with_item_on_promotion, plugins, subtotal_amount
 ):
-    currency = checkout_with_item.currency
+    # given
+    checkout = checkout_with_item_on_promotion
+    currency = checkout.currency
     expected_subtotal = Money(subtotal_amount, currency)
     manager = PluginsManager(plugins=plugins)
-    lines, _ = fetch_checkout_lines(checkout_with_item)
-    checkout_info = fetch_checkout_info(
-        checkout_with_item, lines, [discount_info], manager
-    )
+    lines, _ = fetch_checkout_lines(checkout)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
+
+    # when
     taxed_subtotal = PluginsManager(plugins=plugins).calculate_checkout_subtotal(
-        checkout_info, lines, None, [discount_info]
+        checkout_info, lines, None
     )
+
+    # then
     assert TaxedMoney(expected_subtotal, expected_subtotal) == taxed_subtotal
 
 
 @pytest.mark.parametrize(
-    "plugins, shipping_amount",
+    ("plugins", "shipping_amount"),
     [(["saleor.plugins.tests.sample_plugins.PluginSample"], "1.0"), ([], "0.0")],
 )
 def test_manager_calculates_checkout_shipping(
-    checkout_with_item, discount_info, plugins, shipping_amount
+    checkout_with_item, plugins, shipping_amount
 ):
     currency = checkout_with_item.currency
     expected_shipping_price = Money(shipping_amount, currency)
     manager = PluginsManager(plugins=plugins)
     lines, _ = fetch_checkout_lines(checkout_with_item)
-    checkout_info = fetch_checkout_info(
-        checkout_with_item, lines, [discount_info], manager
-    )
+    checkout_info = fetch_checkout_info(checkout_with_item, lines, manager)
     taxed_shipping_price = PluginsManager(plugins=plugins).calculate_checkout_shipping(
-        checkout_info, lines, None, [discount_info]
+        checkout_info, lines, None
     )
     assert (
         TaxedMoney(expected_shipping_price, expected_shipping_price)
@@ -208,7 +232,7 @@ def test_manager_calculates_checkout_shipping(
 
 
 @pytest.mark.parametrize(
-    "plugins, shipping_amount",
+    ("plugins", "shipping_amount"),
     [(["saleor.plugins.tests.sample_plugins.PluginSample"], "1.0"), ([], "10.0")],
 )
 def test_manager_calculates_order_shipping(order_with_lines, plugins, shipping_amount):
@@ -225,27 +249,31 @@ def test_manager_calculates_order_shipping(order_with_lines, plugins, shipping_a
 
 
 @pytest.mark.parametrize(
-    "plugins, amount",
+    ("plugins", "amount"),
     [(["saleor.plugins.tests.sample_plugins.PluginSample"], "1.0"), ([], "15.0")],
 )
 def test_manager_calculates_checkout_line_total(
-    checkout_with_item, discount_info, plugins, amount
+    checkout_with_item_on_promotion, plugins, amount
 ):
-    currency = checkout_with_item.currency
+    # given
+    checkout = checkout_with_item_on_promotion
+    currency = checkout.currency
     expected_total = Money(amount, currency)
     manager = get_plugins_manager()
-    lines, _ = fetch_checkout_lines(checkout_with_item)
-    checkout_info = fetch_checkout_info(
-        checkout_with_item, lines, [discount_info], manager
-    )
+    lines, _ = fetch_checkout_lines(checkout)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
+
     checkout_line_info = lines[0]
+
+    # when
     taxed_total = PluginsManager(plugins=plugins).calculate_checkout_line_total(
         checkout_info,
         lines,
         checkout_line_info,
-        checkout_with_item.shipping_address,
-        [discount_info],
+        checkout.shipping_address,
     )
+
+    # then
     assert TaxedMoney(expected_total, expected_total) == taxed_total
 
 
@@ -274,17 +302,13 @@ def test_manager_calculates_order_line_total(order_line, plugins):
     assert expected_total == taxed_total
 
 
-def test_manager_get_checkout_line_tax_rate_sample_plugin(
-    checkout_with_item, discount_info
-):
+def test_manager_get_checkout_line_tax_rate_sample_plugin(checkout_with_item):
     plugins = ["saleor.plugins.tests.sample_plugins.PluginSample"]
     unit_price = TaxedMoney(Money(12, "USD"), Money(15, "USD"))
 
     manager = get_plugins_manager()
     lines, _ = fetch_checkout_lines(checkout_with_item)
-    checkout_info = fetch_checkout_info(
-        checkout_with_item, lines, [discount_info], manager
-    )
+    checkout_info = fetch_checkout_info(checkout_with_item, lines, manager)
     checkout_line_info = lines[0]
 
     tax_rate = PluginsManager(plugins=plugins).get_checkout_line_tax_rate(
@@ -292,34 +316,30 @@ def test_manager_get_checkout_line_tax_rate_sample_plugin(
         lines,
         checkout_line_info,
         checkout_with_item.shipping_address,
-        [discount_info],
         unit_price,
     )
     assert tax_rate == Decimal("0.08")
 
 
 @pytest.mark.parametrize(
-    "unit_price, expected_tax_rate",
+    ("unit_price", "expected_tax_rate"),
     [
         (TaxedMoney(Money(12, "USD"), Money(15, "USD")), Decimal("0.25")),
         (Decimal("0.0"), Decimal("0.0")),
     ],
 )
 def test_manager_get_checkout_line_tax_rate_no_plugins(
-    checkout_with_item, discount_info, unit_price, expected_tax_rate
+    checkout_with_item, unit_price, expected_tax_rate
 ):
     manager = get_plugins_manager()
     lines, _ = fetch_checkout_lines(checkout_with_item)
-    checkout_info = fetch_checkout_info(
-        checkout_with_item, lines, [discount_info], manager
-    )
+    checkout_info = fetch_checkout_info(checkout_with_item, lines, manager)
     checkout_line_info = lines[0]
     tax_rate = PluginsManager(plugins=[]).get_checkout_line_tax_rate(
         checkout_info,
         lines,
         checkout_line_info,
         checkout_with_item.shipping_address,
-        [discount_info],
         unit_price,
     )
     assert tax_rate == expected_tax_rate
@@ -342,7 +362,7 @@ def test_manager_get_order_line_tax_rate_sample_plugin(order_with_lines):
 
 
 @pytest.mark.parametrize(
-    "unit_price, expected_tax_rate",
+    ("unit_price", "expected_tax_rate"),
     [
         (TaxedMoney(Money(12, "USD"), Money(15, "USD")), Decimal("0.25")),
         (Decimal("0.0"), Decimal("0.0")),
@@ -364,49 +384,41 @@ def test_manager_get_order_line_tax_rate_no_plugins(
     assert tax_rate == expected_tax_rate
 
 
-def test_manager_get_checkout_shipping_tax_rate_sample_plugin(
-    checkout_with_item, discount_info
-):
+def test_manager_get_checkout_shipping_tax_rate_sample_plugin(checkout_with_item):
     plugins = ["saleor.plugins.tests.sample_plugins.PluginSample"]
     shipping_price = TaxedMoney(Money(12, "USD"), Money(14, "USD"))
 
     manager = get_plugins_manager()
     lines, _ = fetch_checkout_lines(checkout_with_item)
-    checkout_info = fetch_checkout_info(
-        checkout_with_item, lines, [discount_info], manager
-    )
+    checkout_info = fetch_checkout_info(checkout_with_item, lines, manager)
 
     tax_rate = PluginsManager(plugins=plugins).get_checkout_shipping_tax_rate(
         checkout_info,
         lines,
         checkout_with_item.shipping_address,
-        [discount_info],
         shipping_price,
     )
     assert tax_rate == Decimal("0.08")
 
 
 @pytest.mark.parametrize(
-    "shipping_price, expected_tax_rate",
+    ("shipping_price", "expected_tax_rate"),
     [
         (TaxedMoney(Money(12, "USD"), Money(14, "USD")), Decimal("0.1667")),
         (Decimal("0.0"), Decimal("0.0")),
     ],
 )
 def test_manager_get_checkout_shipping_tax_rate_no_plugins(
-    checkout_with_item, discount_info, shipping_price, expected_tax_rate
+    checkout_with_item, shipping_price, expected_tax_rate
 ):
     manager = get_plugins_manager()
     lines, _ = fetch_checkout_lines(checkout_with_item)
-    checkout_info = fetch_checkout_info(
-        checkout_with_item, lines, [discount_info], manager
-    )
+    checkout_info = fetch_checkout_info(checkout_with_item, lines, manager)
 
     tax_rate = PluginsManager(plugins=[]).get_checkout_shipping_tax_rate(
         checkout_info,
         lines,
         checkout_with_item.shipping_address,
-        [discount_info],
         shipping_price,
     )
     assert tax_rate == expected_tax_rate
@@ -424,7 +436,7 @@ def test_manager_get_order_shipping_tax_rate_sample_plugin(order_with_lines):
 
 
 @pytest.mark.parametrize(
-    "shipping_price, expected_tax_rate",
+    ("shipping_price", "expected_tax_rate"),
     [
         (TaxedMoney(Money(12, "USD"), Money(14, "USD")), Decimal("0.1667")),
         (Decimal("0.0"), Decimal("0.0")),
@@ -442,7 +454,7 @@ def test_manager_get_order_shipping_tax_rate_no_plugins(
 
 
 @pytest.mark.parametrize(
-    "plugins, total_line_price, quantity",
+    ("plugins", "total_line_price", "quantity"),
     [
         (
             ["saleor.plugins.tests.sample_plugins.PluginSample"],
@@ -467,7 +479,7 @@ def test_manager_calculates_checkout_line_unit_price(
 ):
     manager = PluginsManager(plugins=plugins)
     lines, _ = fetch_checkout_lines(checkout_with_item)
-    checkout_info = fetch_checkout_info(checkout_with_item, lines, [], manager)
+    checkout_info = fetch_checkout_info(checkout_with_item, lines, manager)
     checkout_line_info = lines[0]
 
     taxed_total = PluginsManager(plugins=plugins).calculate_checkout_line_unit_price(
@@ -475,7 +487,6 @@ def test_manager_calculates_checkout_line_unit_price(
         lines,
         checkout_line_info,
         address,
-        [],
     )
     currency = total_line_price.net.currency
     expected_net = Money(
@@ -488,7 +499,7 @@ def test_manager_calculates_checkout_line_unit_price(
 
 
 @pytest.mark.parametrize(
-    "plugins, amount",
+    ("plugins", "amount"),
     [(["saleor.plugins.tests.sample_plugins.PluginSample"], "1.0"), ([], "12.30")],
 )
 def test_manager_calculates_order_line(order_line, plugins, amount):
@@ -506,7 +517,7 @@ def test_manager_calculates_order_line(order_line, plugins, amount):
 
 
 @pytest.mark.parametrize(
-    "plugins, tax_rate_list",
+    ("plugins", "tax_rate_list"),
     [
         (
             ["saleor.plugins.tests.sample_plugins.PluginSample"],
@@ -524,7 +535,7 @@ def sample_none_data(obj):
 
 
 @pytest.mark.parametrize(
-    "plugins, show_taxes",
+    ("plugins", "show_taxes"),
     [(["saleor.plugins.tests.sample_plugins.PluginSample"], True), ([], False)],
 )
 def test_manager_show_taxes_on_storefront(plugins, show_taxes):
@@ -532,7 +543,7 @@ def test_manager_show_taxes_on_storefront(plugins, show_taxes):
 
 
 @pytest.mark.parametrize(
-    "plugins, expected_tax_data",
+    ("plugins", "expected_tax_data"),
     [
         ([], sample_none_data),
         (["saleor.plugins.tests.sample_plugins.PluginSample"], sample_tax_data),
@@ -545,14 +556,14 @@ def test_manager_get_taxes_for_checkout(
 ):
     lines, _ = fetch_checkout_lines(checkout)
     manager = get_plugins_manager()
-    checkout_info = fetch_checkout_info(checkout, lines, [], manager)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
     assert PluginsManager(plugins=plugins).get_taxes_for_checkout(
         checkout_info, lines
     ) == expected_tax_data(checkout)
 
 
 @pytest.mark.parametrize(
-    "plugins, expected_tax_data",
+    ("plugins", "expected_tax_data"),
     [
         ([], sample_none_data),
         (["saleor.plugins.tests.sample_plugins.PluginSample"], sample_tax_data),
@@ -568,61 +579,67 @@ def test_manager_get_taxes_for_order(
     ) == expected_tax_data(order)
 
 
-def test_manager_sale_created(sale):
+def test_manager_sale_created(promotion_converted_from_sale):
     plugins = ["saleor.plugins.tests.sample_plugins.PluginSample"]
 
-    current_catalogue = convert_catalogue_info_to_global_ids(fetch_catalogue_info(sale))
-    sale_returned, current_catalogue_returned = PluginsManager(
+    promotion = promotion_converted_from_sale
+    predicate = promotion.rules.first().catalogue_predicate
+    current_catalogue = convert_migrated_sale_predicate_to_catalogue_info(predicate)
+    promotion_returned, current_catalogue_returned = PluginsManager(
         plugins=plugins
-    ).sale_created(sale, current_catalogue)
+    ).sale_created(promotion, current_catalogue)
 
-    assert sale == sale_returned
+    assert promotion == promotion_returned
     assert current_catalogue == current_catalogue_returned
 
 
-def test_manager_sale_updated(sale):
+def test_manager_sale_updated(promotion_converted_from_sale):
     plugins = ["saleor.plugins.tests.sample_plugins.PluginSample"]
 
-    previous_catalogue = convert_catalogue_info_to_global_ids(
-        fetch_catalogue_info(sale)
-    )
-    current_catalogue = convert_catalogue_info_to_global_ids(fetch_catalogue_info(sale))
+    promotion = promotion_converted_from_sale
+    predicate = promotion.rules.first().catalogue_predicate
+    current_catalogue = convert_migrated_sale_predicate_to_catalogue_info(predicate)
+    previous_catalogue = convert_migrated_sale_predicate_to_catalogue_info(predicate)
     (
-        sale_returned,
+        promotion_returned,
         previous_catalogue_returned,
         current_catalogue_returned,
     ) = PluginsManager(plugins=plugins).sale_updated(
-        sale, previous_catalogue, current_catalogue
+        promotion, previous_catalogue, current_catalogue
     )
 
-    assert sale == sale_returned
+    assert promotion == promotion_returned
     assert current_catalogue == current_catalogue_returned
     assert previous_catalogue == previous_catalogue_returned
 
 
-def test_manager_sale_deleted(sale):
+def test_manager_sale_deleted(promotion_converted_from_sale):
     plugins = ["saleor.plugins.tests.sample_plugins.PluginSample"]
 
-    previous_catalogue = convert_catalogue_info_to_global_ids(
-        fetch_catalogue_info(sale)
-    )
-    sale_returned, previous_catalogue_returned = PluginsManager(
-        plugins=plugins
-    ).sale_created(sale, previous_catalogue)
+    promotion = promotion_converted_from_sale
+    predicate = promotion.rules.first().catalogue_predicate
+    previous_catalogue = convert_migrated_sale_predicate_to_catalogue_info(predicate)
 
-    assert sale == sale_returned
+    promotion_returned, previous_catalogue_returned = PluginsManager(
+        plugins=plugins
+    ).sale_created(promotion, previous_catalogue)
+
+    assert promotion == promotion_returned
     assert previous_catalogue == previous_catalogue_returned
 
 
-def test_manager_sale_toggle(sale):
+def test_manager_sale_toggle(promotion_converted_from_sale):
     plugins = ["saleor.plugins.tests.sample_plugins.PluginSample"]
 
-    current_catalogue = convert_catalogue_info_to_global_ids(fetch_catalogue_info(sale))
-    sale_returned, current_catalogue_returned = PluginsManager(
-        plugins=plugins
-    ).sale_toggle(sale, current_catalogue)
+    promotion = promotion_converted_from_sale
+    predicate = promotion.rules.first().catalogue_predicate
+    current_catalogue = convert_migrated_sale_predicate_to_catalogue_info(predicate)
 
-    assert sale == sale_returned
+    promotion_returned, current_catalogue_returned = PluginsManager(
+        plugins=plugins
+    ).sale_toggle(promotion, current_catalogue)
+
+    assert promotion == promotion_returned
     assert current_catalogue == current_catalogue_returned
 
 
@@ -653,7 +670,6 @@ def test_plugin_updates_configuration_shape(
     plugin_configuration,
     monkeypatch,
 ):
-
     config_structure = PluginSample.CONFIG_STRUCTURE.copy()
     config_structure["Foo"] = new_config_structure
     monkeypatch.setattr(PluginSample, "CONFIG_STRUCTURE", config_structure)
@@ -1122,12 +1138,11 @@ def test_manager_delivery_retry(event_delivery):
 @mock.patch(
     "saleor.plugins.manager.PluginsManager._PluginsManager__run_method_on_single_plugin"
 )
-@mock.patch("saleor.plugins.manager.base_calculations.base_checkout_total")
+@mock.patch("saleor.plugins.manager.base_calculations.checkout_total")
 def test_calculate_checkout_total_zero_default_value(
     mocked_base_checkout_total,
     mocked_run_method,
     checkout_with_item,
-    discount_info,
 ):
     # given
     plugins = ["saleor.plugins.tests.sample_plugins.PluginSample"]
@@ -1135,14 +1150,10 @@ def test_calculate_checkout_total_zero_default_value(
     mocked_base_checkout_total.return_value = zero_money(currency)
     manager = PluginsManager(plugins=plugins)
     lines, _ = fetch_checkout_lines(checkout_with_item)
-    checkout_info = fetch_checkout_info(
-        checkout_with_item, lines, [discount_info], manager
-    )
+    checkout_info = fetch_checkout_info(checkout_with_item, lines, manager)
 
     # when
-    taxed_total = manager.calculate_checkout_total(
-        checkout_info, lines, None, [discount_info]
-    )
+    taxed_total = manager.calculate_checkout_total(checkout_info, lines, None)
 
     # then
     assert "calculate_checkout_total" not in mocked_run_method.call_args_list
@@ -1174,3 +1185,375 @@ def test_manager_is_event_active_for_any_plugin(channel_USD):
     assert manager.is_event_active_for_any_plugin(
         "calculate_checkout_total", channel_USD.slug
     )
+
+
+def test_manager_payment_gateway_initialize_session(channel_USD, checkout):
+    # given
+    plugins = [
+        "saleor.plugins.tests.sample_plugins.PluginSample",
+        "saleor.plugins.tests.sample_plugins.PluginInactive",
+    ]
+
+    manager = PluginsManager(plugins=plugins)
+
+    # when
+    response = manager.payment_gateway_initialize_session(
+        amount=Decimal("10.00"),
+        payment_gateways=None,
+        source_object=checkout,
+    )
+
+    # then
+    assert isinstance(response, list)
+    assert len(response) == 1
+
+
+def test_manager_transaction_initialize_session(
+    channel_USD, checkout, webhook_app, transaction_item_generator
+):
+    # given
+    plugins = [
+        "saleor.plugins.tests.sample_plugins.PluginSample",
+        "saleor.plugins.tests.sample_plugins.PluginInactive",
+    ]
+
+    manager = PluginsManager(plugins=plugins)
+
+    transaction = transaction_item_generator(
+        checkout_id=checkout.pk,
+        app=webhook_app,
+        psp_reference=None,
+        name=None,
+        message=None,
+    )
+    action_type = TransactionFlowStrategy.CHARGE
+
+    transaction_session_data = TransactionSessionData(
+        transaction=transaction,
+        source_object=checkout,
+        action=TransactionProcessActionData(
+            amount=Decimal("10"),
+            currency=transaction.currency,
+            action_type=action_type,
+        ),
+        customer_ip_address="127.0.0.1",
+        payment_gateway_data=PaymentGatewayData(
+            app_identifier=webhook_app.identifier, data=None, error=None
+        ),
+    )
+    # when
+    response = manager.transaction_initialize_session(
+        transaction_session_data=transaction_session_data
+    )
+
+    # then
+    assert isinstance(response, TransactionSessionResult)
+
+
+def test_manager_transaction_process_session(
+    channel_USD, checkout, webhook_app, transaction_item_generator
+):
+    # given
+    plugins = [
+        "saleor.plugins.tests.sample_plugins.PluginSample",
+        "saleor.plugins.tests.sample_plugins.PluginInactive",
+    ]
+
+    manager = PluginsManager(plugins=plugins)
+
+    transaction = transaction_item_generator(
+        checkout_id=checkout.pk,
+        app=webhook_app,
+        psp_reference=None,
+        name=None,
+        message=None,
+    )
+    action_type = TransactionFlowStrategy.CHARGE
+
+    transaction_session_data = TransactionSessionData(
+        transaction=transaction,
+        source_object=checkout,
+        action=TransactionProcessActionData(
+            amount=Decimal("10"),
+            currency=transaction.currency,
+            action_type=action_type,
+        ),
+        customer_ip_address="127.0.0.1",
+        payment_gateway_data=PaymentGatewayData(
+            app_identifier=webhook_app.identifier, data=None, error=None
+        ),
+    )
+    # when
+    response = manager.transaction_process_session(
+        transaction_session_data=transaction_session_data
+    )
+
+    # then
+    assert isinstance(response, TransactionSessionResult)
+
+
+@patch("saleor.plugins.tests.sample_plugins.PluginSample.checkout_fully_paid")
+def test_checkout_fully_paid(mocked_sample_method, checkout):
+    # given
+    plugins = [
+        "saleor.plugins.tests.sample_plugins.PluginSample",
+        "saleor.plugins.tests.sample_plugins.PluginInactive",
+    ]
+
+    manager = PluginsManager(plugins=plugins)
+
+    # when
+    manager.checkout_fully_paid(checkout)
+
+    # then
+    mocked_sample_method.assert_called_once_with(checkout, previous_value=None)
+
+
+@patch("saleor.plugins.tests.sample_plugins.PluginSample.order_fully_refunded")
+def test_order_fully_refunded(mocked_sample_method, order):
+    # given
+    plugins = [
+        "saleor.plugins.tests.sample_plugins.PluginSample",
+        "saleor.plugins.tests.sample_plugins.PluginInactive",
+    ]
+
+    manager = PluginsManager(plugins=plugins)
+
+    # when
+    manager.order_fully_refunded(order)
+
+    # then
+    mocked_sample_method.assert_called_once_with(order, previous_value=None)
+
+
+@patch("saleor.plugins.tests.sample_plugins.PluginSample.order_refunded")
+def test_order_refunded(mocked_sample_method, order):
+    # given
+    plugins = [
+        "saleor.plugins.tests.sample_plugins.PluginSample",
+        "saleor.plugins.tests.sample_plugins.PluginInactive",
+    ]
+
+    manager = PluginsManager(plugins=plugins)
+
+    # when
+    manager.order_refunded(order)
+
+    # then
+    mocked_sample_method.assert_called_once_with(order, previous_value=None)
+
+
+@patch("saleor.plugins.tests.sample_plugins.PluginSample.order_paid")
+def test_order_paid(mocked_sample_method, order):
+    # given
+    plugins = [
+        "saleor.plugins.tests.sample_plugins.PluginSample",
+        "saleor.plugins.tests.sample_plugins.PluginInactive",
+    ]
+
+    manager = PluginsManager(plugins=plugins)
+
+    # when
+    manager.order_paid(order)
+
+    # then
+    mocked_sample_method.assert_called_once_with(order, previous_value=None)
+
+
+@patch("saleor.plugins.tests.sample_plugins.PluginSample.list_stored_payment_methods")
+def test_list_stored_payment_methods(
+    mocked_list_stored_payment_methods, channel_USD, customer_user
+):
+    # given
+    data = ListStoredPaymentMethodsRequestData(
+        channel=channel_USD,
+        user=customer_user,
+    )
+
+    plugins = [
+        "saleor.plugins.tests.sample_plugins.PluginSample",
+        "saleor.plugins.tests.sample_plugins.PluginInactive",
+    ]
+    manager = PluginsManager(plugins=plugins)
+
+    # when
+    manager.list_stored_payment_methods(data)
+
+    # then
+    mocked_list_stored_payment_methods.assert_called_once()
+
+
+@patch(
+    "saleor.plugins.tests.sample_plugins.PluginSample.stored_payment_method_request_delete"
+)
+def test_stored_payment_method_request_delete(
+    mocked_stored_payment_method_request_delete, customer_user, channel_USD
+):
+    # given
+    plugins = [
+        "saleor.plugins.tests.sample_plugins.PluginSample",
+        "saleor.plugins.tests.sample_plugins.PluginInactive",
+    ]
+    manager = PluginsManager(plugins=plugins)
+    request_delete_data = StoredPaymentMethodRequestDeleteData(
+        user=customer_user, payment_method_id="123", channel=channel_USD
+    )
+    previous_response = StoredPaymentMethodRequestDeleteResponseData(
+        result=StoredPaymentMethodRequestDeleteResult.FAILED_TO_DELIVER,
+        error="Payment method request delete failed to deliver.",
+    )
+    # when
+    manager.stored_payment_method_request_delete(
+        request_delete_data=request_delete_data
+    )
+
+    # then
+    mocked_stored_payment_method_request_delete.assert_called_once_with(
+        request_delete_data, previous_value=previous_response
+    )
+
+
+@patch(
+    "saleor.plugins.tests.sample_plugins.PluginSample."
+    "payment_gateway_initialize_tokenization"
+)
+def test_payment_gateway_initialize_tokenization(
+    mocked_payment_gateway_initialize_tokenization, customer_user, channel_USD, app
+):
+    # given
+    plugins = [
+        "saleor.plugins.tests.sample_plugins.PluginSample",
+        "saleor.plugins.tests.sample_plugins.PluginInactive",
+    ]
+    manager = PluginsManager(plugins=plugins)
+    request_data = PaymentGatewayInitializeTokenizationRequestData(
+        user=customer_user,
+        app_identifier=app.identifier,
+        channel=channel_USD,
+        data={"data": "ABC"},
+    )
+    previous_response = PaymentGatewayInitializeTokenizationResponseData(
+        result=PaymentGatewayInitializeTokenizationResult.FAILED_TO_DELIVER,
+        error="Payment gateway initialize tokenization failed to deliver.",
+        data=None,
+    )
+
+    # when
+    manager.payment_gateway_initialize_tokenization(request_data=request_data)
+
+    # then
+    mocked_payment_gateway_initialize_tokenization.assert_called_once_with(
+        request_data, previous_value=previous_response
+    )
+
+
+@patch(
+    "saleor.plugins.tests.sample_plugins.PluginSample."
+    "payment_method_initialize_tokenization"
+)
+def test_payment_method_initialize_tokenization(
+    mocked_payment_method_initialize_tokenization, customer_user, channel_USD, app
+):
+    # given
+    plugins = [
+        "saleor.plugins.tests.sample_plugins.PluginSample",
+        "saleor.plugins.tests.sample_plugins.PluginInactive",
+    ]
+    manager = PluginsManager(plugins=plugins)
+    request_data = PaymentMethodInitializeTokenizationRequestData(
+        user=customer_user,
+        app_identifier=app.identifier,
+        channel=channel_USD,
+        data={"data": "ABC"},
+        payment_flow_to_support=TokenizedPaymentFlow.INTERACTIVE,
+    )
+    previous_response = PaymentMethodTokenizationResponseData(
+        result=PaymentMethodTokenizationResult.FAILED_TO_DELIVER,
+        error="Payment method initialize tokenization failed to deliver.",
+        data=None,
+    )
+
+    # when
+    manager.payment_method_initialize_tokenization(request_data=request_data)
+
+    # then
+    mocked_payment_method_initialize_tokenization.assert_called_once_with(
+        request_data, previous_value=previous_response
+    )
+
+
+@patch(
+    "saleor.plugins.tests.sample_plugins.PluginSample."
+    "payment_method_process_tokenization"
+)
+def test_payment_method_process_tokenization(
+    mocked_payment_method_process_tokenization, customer_user, channel_USD, app
+):
+    # given
+    plugins = [
+        "saleor.plugins.tests.sample_plugins.PluginSample",
+        "saleor.plugins.tests.sample_plugins.PluginInactive",
+    ]
+    manager = PluginsManager(plugins=plugins)
+
+    expected_id = "test_id"
+
+    request_data = PaymentMethodProcessTokenizationRequestData(
+        user=customer_user,
+        id=expected_id,
+        channel=channel_USD,
+        data={"data": "ABC"},
+    )
+    previous_response = PaymentMethodTokenizationResponseData(
+        result=PaymentMethodTokenizationResult.FAILED_TO_DELIVER,
+        error="Payment method process tokenization failed to deliver.",
+        data=None,
+    )
+
+    # when
+    manager.payment_method_process_tokenization(request_data=request_data)
+
+    # then
+    mocked_payment_method_process_tokenization.assert_called_once_with(
+        request_data, previous_value=previous_response
+    )
+
+
+@pytest.mark.parametrize(
+    ("allow_replica", "expected_connection_name"),
+    [
+        (True, "test replica"),
+        (False, "test default"),
+    ],
+)
+def test_plugin_manager_database(allow_replica, expected_connection_name):
+    # given
+    manager = PluginsManager(
+        ["saleor.plugins.tests.sample_plugins.PluginSample"],
+        allow_replica=allow_replica,
+    )
+
+    # when & then
+    with override_settings(
+        DATABASE_CONNECTION_REPLICA_NAME="test replica",
+        DATABASE_CONNECTION_DEFAULT_NAME="test default",
+    ):
+        assert manager.database == expected_connection_name
+
+
+def test_plugin_manager__get_channel_map(
+    channel_USD, channel_PLN, channel_JPY, other_channel_USD
+):
+    # given
+    manager = PluginsManager(["saleor.plugins.tests.sample_plugins.PluginSample"])
+
+    # when
+    channel_map = manager._get_channel_map()
+
+    # then
+    assert channel_map == {
+        channel_USD.pk: channel_USD,
+        channel_PLN.pk: channel_PLN,
+        channel_JPY.pk: channel_JPY,
+        other_channel_USD.pk: other_channel_USD,
+    }

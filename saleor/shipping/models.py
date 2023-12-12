@@ -1,4 +1,6 @@
-from typing import TYPE_CHECKING, List, Union
+from collections.abc import Iterable
+from decimal import Decimal
+from typing import TYPE_CHECKING, Optional, Union
 
 from django.conf import settings
 from django.db import models
@@ -12,17 +14,19 @@ from prices import Money
 from ..channel.models import Channel
 from ..core.db.fields import SanitizedJSONField
 from ..core.models import ModelWithMetadata
-from ..core.permissions import ShippingPermissions
 from ..core.units import WeightUnits
 from ..core.utils.editorjs import clean_editor_js
-from ..core.utils.translations import Translation, TranslationProxy
+from ..core.utils.translations import Translation
 from ..core.weight import convert_weight, get_default_weight_unit, zero_weight
+from ..permission.enums import ShippingPermissions
 from ..tax.models import TaxClass
 from . import PostalCodeRuleInclusionType, ShippingMethodType
 from .postal_codes import filter_shipping_methods_by_postal_code_rules
 
 if TYPE_CHECKING:
+    from ..checkout.fetch import CheckoutLineInfo
     from ..checkout.models import Checkout
+    from ..order.fetch import OrderLineInfo
     from ..order.models import Order
 
 
@@ -67,11 +71,8 @@ def _get_weight_type_display(min_weight, max_weight):
         max_weight = convert_weight(max_weight, default_unit)
 
     if max_weight is None:
-        return ("%(min_weight)s and up" % {"min_weight": min_weight},)
-    return "%(min_weight)s to %(max_weight)s" % {
-        "min_weight": min_weight,
-        "max_weight": max_weight,
-    }
+        return f"{min_weight} and up"
+    return f"{min_weight} to {max_weight}"
 
 
 class ShippingZone(ModelWithMetadata):
@@ -90,7 +91,7 @@ class ShippingZone(ModelWithMetadata):
         )
 
 
-class ShippingMethodQueryset(models.QuerySet):
+class ShippingMethodQueryset(models.QuerySet["ShippingMethod"]):
     def price_based(self):
         return self.filter(type=ShippingMethodType.PRICE_BASED)
 
@@ -113,7 +114,7 @@ class ShippingMethodQueryset(models.QuerySet):
         )
 
     def exclude_shipping_methods_for_excluded_products(
-        self, qs, product_ids: List[int]
+        self, qs, product_ids: list[int]
     ):
         """Exclude the ShippingMethods which have excluded given products."""
         return qs.exclude(excluded_products__id__in=product_ids)
@@ -152,20 +153,22 @@ class ShippingMethodQueryset(models.QuerySet):
         instance: Union["Checkout", "Order"],
         channel_id,
         price: Money,
-        country_code=None,
-        lines=None,
+        country_code: Optional[str] = None,
+        lines: Union[
+            Iterable["CheckoutLineInfo"], Iterable["OrderLineInfo"], None
+        ] = None,
     ):
         if not instance.shipping_address:
             return None
         if not country_code:
             # TODO: country_code should come from argument
-            country_code = instance.shipping_address.country.code  # type: ignore
+            country_code = instance.shipping_address.country.code
         if lines is None:
             # TODO: lines should comes from args in get_valid_shipping_methods_for_order
-            lines = instance.lines.prefetch_related("variant__product").all()
-            instance_product_ids = set(lines.values_list("variant__product", flat=True))
-        else:
-            instance_product_ids = {line.product.id for line in lines}
+            lines = list(instance.lines.prefetch_related("variant__product").all())  # type: ignore[misc] # this is hack # noqa: E501
+        instance_product_ids = {
+            line.variant.product_id for line in lines if line.variant
+        }
         applicable_methods = self.applicable_shipping_methods(
             price=price,
             channel_id=channel_id,
@@ -179,6 +182,9 @@ class ShippingMethodQueryset(models.QuerySet):
         )
 
 
+ShippingMethodManager = models.Manager.from_queryset(ShippingMethodQueryset)
+
+
 class ShippingMethod(ModelWithMetadata):
     name = models.CharField(max_length=100)
     type = models.CharField(max_length=30, choices=ShippingMethodType.CHOICES)
@@ -187,20 +193,18 @@ class ShippingMethod(ModelWithMetadata):
     )
     minimum_order_weight = MeasurementField(
         measurement=Weight,
-        unit_choices=WeightUnits.CHOICES,  # type: ignore
+        unit_choices=WeightUnits.CHOICES,
         default=zero_weight,
         blank=True,
         null=True,
     )
     maximum_order_weight = MeasurementField(
         measurement=Weight,
-        unit_choices=WeightUnits.CHOICES,  # type: ignore
+        unit_choices=WeightUnits.CHOICES,
         blank=True,
         null=True,
     )
-    excluded_products = models.ManyToManyField(
-        "product.Product", blank=True
-    )  # type: ignore
+    excluded_products = models.ManyToManyField("product.Product", blank=True)
     maximum_delivery_days = models.PositiveIntegerField(null=True, blank=True)
     minimum_delivery_days = models.PositiveIntegerField(null=True, blank=True)
     description = SanitizedJSONField(blank=True, null=True, sanitizer=clean_editor_js)
@@ -212,8 +216,7 @@ class ShippingMethod(ModelWithMetadata):
         null=True,
     )
 
-    objects = models.Manager.from_queryset(ShippingMethodQueryset)()
-    translated = TranslationProxy()
+    objects = ShippingMethodManager()
 
     class Meta(ModelWithMetadata.Meta):
         ordering = ("pk",)
@@ -264,7 +267,7 @@ class ShippingMethodChannelListing(models.Model):
     minimum_order_price_amount = models.DecimalField(
         max_digits=settings.DEFAULT_MAX_DIGITS,
         decimal_places=settings.DEFAULT_DECIMAL_PLACES,
-        default=0,
+        default=Decimal("0.0"),
         blank=True,
         null=True,
     )
@@ -287,7 +290,7 @@ class ShippingMethodChannelListing(models.Model):
     price_amount = models.DecimalField(
         max_digits=settings.DEFAULT_MAX_DIGITS,
         decimal_places=settings.DEFAULT_DECIMAL_PLACES,
-        default=0,
+        default=Decimal("0.0"),
     )
 
     def get_total(self):

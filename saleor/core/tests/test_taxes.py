@@ -1,14 +1,15 @@
 import pytest
+from django.utils import timezone
 
 from ...app.models import App
-from ...plugins.webhook.utils import get_current_tax_app
-from ...webhook.event_types import WebhookEventAsyncType, WebhookEventSyncType
-from ...webhook.models import Webhook, WebhookEvent
-from ..permissions import (
+from ...permission.enums import (
     CheckoutPermissions,
     OrderPermissions,
     get_permissions_from_codenames,
 )
+from ...webhook.event_types import WebhookEventAsyncType, WebhookEventSyncType
+from ...webhook.models import Webhook, WebhookEvent
+from ...webhook.transport.utils import get_current_tax_app
 
 
 @pytest.fixture
@@ -63,6 +64,12 @@ def tax_app(tax_app_factory):
 
 def test_get_current_tax_app(tax_app):
     assert tax_app == get_current_tax_app()
+
+
+def test_get_current_tax_app_removed_app(tax_app):
+    tax_app.removed_at = timezone.now()
+    tax_app.save(update_fields=["removed_at"])
+    assert get_current_tax_app() is None
 
 
 def test_get_current_tax_app_multiple_apps(app_factory, tax_app_factory):

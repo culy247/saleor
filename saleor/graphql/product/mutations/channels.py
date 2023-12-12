@@ -1,6 +1,6 @@
 from collections import defaultdict
 from datetime import datetime
-from typing import TYPE_CHECKING, DefaultDict, Dict, List
+from typing import TYPE_CHECKING
 
 import graphene
 import pytz
@@ -8,29 +8,33 @@ from django.core.exceptions import ValidationError
 from django.db.utils import IntegrityError
 
 from ....checkout.models import CheckoutLine
-from ....core.permissions import ProductPermissions
 from ....core.tracing import traced_atomic_transaction
 from ....core.utils.date_time import convert_to_utc_date_time
+from ....permission.enums import ProductPermissions
 from ....product.error_codes import CollectionErrorCode, ProductErrorCode
-from ....product.models import CollectionChannelListing
+from ....product.models import (
+    CollectionChannelListing,
+    ProductChannelListing,
+    ProductVariantChannelListing,
+)
 from ....product.models import Product as ProductModel
-from ....product.models import ProductChannelListing
 from ....product.models import ProductVariant as ProductVariantModel
-from ....product.models import ProductVariantChannelListing
-from ....product.tasks import update_product_discounted_price_task
+from ....product.tasks import update_products_discounted_prices_for_promotion_task
 from ...channel import ChannelContext
 from ...channel.mutations import BaseChannelListingMutation
 from ...channel.types import Channel
+from ...core import ResolveInfo
 from ...core.descriptions import (
     ADDED_IN_31,
     ADDED_IN_33,
     ADDED_IN_38,
     DEPRECATED_IN_3X_INPUT,
-    PREVIEW_FEATURE,
 )
+from ...core.doc_category import DOC_CATEGORY_PRODUCTS
 from ...core.mutations import BaseMutation
-from ...core.scalars import PositiveDecimal
+from ...core.scalars import Date, PositiveDecimal
 from ...core.types import (
+    BaseInputObjectType,
     CollectionChannelListingError,
     NonNullList,
     ProductChannelListingError,
@@ -40,23 +44,24 @@ from ...core.validators import (
     validate_one_of_args_is_in_mutation,
     validate_price_precision,
 )
-from ...plugins.dataloaders import load_plugin_manager
+from ...plugins.dataloaders import get_plugin_manager_promise
 from ...utils.validators import check_for_duplicates
-from ..types.products import Collection, Product, ProductVariant
+from ..types.collections import Collection
+from ..types.products import Product, ProductVariant
 
 if TYPE_CHECKING:
     from ....channel.models import Channel as ChannelModel
     from ....product.models import Collection as CollectionModel
 
-ErrorType = DefaultDict[str, List[ValidationError]]
+ErrorType = defaultdict[str, list[ValidationError]]
 
 
-class PublishableChannelListingInput(graphene.InputObjectType):
+class PublishableChannelListingInput(BaseInputObjectType):
     channel_id = graphene.ID(required=True, description="ID of a channel.")
     is_published = graphene.Boolean(
         description="Determines if object is visible to customers."
     )
-    publication_date = graphene.types.datetime.Date(
+    publication_date = Date(
         description=(
             f"Publication date. ISO 8601 standard. {DEPRECATED_IN_3X_INPUT} "
             "Use `publishedAt` field instead."
@@ -65,6 +70,9 @@ class PublishableChannelListingInput(graphene.InputObjectType):
     published_at = graphene.types.datetime.DateTime(
         description="Publication date time. ISO 8601 standard." + ADDED_IN_33
     )
+
+    class Meta:
+        doc_category = DOC_CATEGORY_PRODUCTS
 
 
 class ProductChannelListingAddInput(PublishableChannelListingInput):
@@ -75,9 +83,13 @@ class ProductChannelListingAddInput(PublishableChannelListingInput):
         )
     )
     is_available_for_purchase = graphene.Boolean(
-        description="Determine if product should be available for purchase.",
+        description=(
+            "Determines if product should be available for purchase in this channel. "
+            "This does not guarantee the availability of stock. When set to `False`, "
+            "this product is still visible to customers, but it cannot be purchased."
+        ),
     )
-    available_for_purchase_date = graphene.Date(
+    available_for_purchase_date = Date(
         description=(
             "A start date from which a product will be available for purchase. "
             "When not set and isAvailable is set to True, "
@@ -103,8 +115,11 @@ class ProductChannelListingAddInput(PublishableChannelListingInput):
         required=False,
     )
 
+    class Meta:
+        doc_category = DOC_CATEGORY_PRODUCTS
 
-class ProductChannelListingUpdateInput(graphene.InputObjectType):
+
+class ProductChannelListingUpdateInput(BaseInputObjectType):
     update_channels = NonNullList(
         ProductChannelListingAddInput,
         description=(
@@ -117,6 +132,9 @@ class ProductChannelListingUpdateInput(graphene.InputObjectType):
         description="List of channels from which the product should be unassigned.",
         required=False,
     )
+
+    class Meta:
+        doc_category = DOC_CATEGORY_PRODUCTS
 
 
 class ProductChannelListingUpdate(BaseChannelListingMutation):
@@ -131,14 +149,15 @@ class ProductChannelListingUpdate(BaseChannelListingMutation):
 
     class Meta:
         description = "Manage product's availability in channels."
+        doc_category = DOC_CATEGORY_PRODUCTS
         permissions = (ProductPermissions.MANAGE_PRODUCTS,)
         error_type_class = ProductChannelListingError
         error_type_field = "product_channel_listing_errors"
 
     @classmethod
     def clean_available_for_purchase(cls, cleaned_input, errors: ErrorType):
-        channels_with_invalid_available_for_purchase: List[str] = []
-        channels_with_invalid_date: List[str] = []
+        channels_with_invalid_available_for_purchase: list[str] = []
+        channels_with_invalid_date: list[str] = []
         for update_channel in cleaned_input.get("update_channels", []):
             is_available_for_purchase = update_channel.get("is_available_for_purchase")
             available_for_purchase_date = update_channel.get(
@@ -216,7 +235,7 @@ class ProductChannelListingUpdate(BaseChannelListingMutation):
             )
 
     @classmethod
-    def update_channels(cls, product: "ProductModel", update_channels: List[Dict]):
+    def update_channels(cls, product: "ProductModel", update_channels: list[dict]):
         for update_channel in update_channels:
             channel = update_channel["channel"]
             add_variants = update_channel.get("add_variants", None)
@@ -265,7 +284,7 @@ class ProductChannelListingUpdate(BaseChannelListingMutation):
                 errors["addVariants"].append(error)
 
     @classmethod
-    def add_variants(cls, channel, add_variants: List[Dict]):
+    def add_variants(cls, channel, add_variants: list[dict]):
         if not add_variants:
             return
         variants = cls.get_nodes_or_error(add_variants, "id", ProductVariant)
@@ -294,7 +313,7 @@ class ProductChannelListingUpdate(BaseChannelListingMutation):
         product_channel_listing,
         product,
         channel,
-        remove_variants: List[Dict],
+        remove_variants: list[dict],
     ):
         if not remove_variants:
             return
@@ -321,7 +340,7 @@ class ProductChannelListingUpdate(BaseChannelListingMutation):
         CheckoutLine.objects.filter(id__in=lines_ids).delete()
 
     @classmethod
-    def remove_channels(cls, product: "ProductModel", remove_channels: List[Dict]):
+    def remove_channels(cls, product: "ProductModel", remove_channels: list[dict]):
         ProductChannelListing.objects.filter(
             product=product, channel_id__in=remove_channels
         ).delete()
@@ -332,18 +351,21 @@ class ProductChannelListingUpdate(BaseChannelListingMutation):
         cls.perform_checkout_lines_delete(variant_ids, remove_channels)
 
     @classmethod
-    def save(cls, info, product: "ProductModel", cleaned_input: Dict):
+    def save(cls, info: ResolveInfo, product: "ProductModel", cleaned_input: dict):
         with traced_atomic_transaction():
             cls.update_channels(product, cleaned_input.get("update_channels", []))
             cls.remove_channels(product, cleaned_input.get("remove_channels", []))
             product = ProductModel.objects.prefetched_for_webhook().get(pk=product.pk)
-            manager = load_plugin_manager(info.context)
+            update_products_discounted_prices_for_promotion_task.delay([product.id])
+            manager = get_plugin_manager_promise(info.context).get()
             cls.call_event(manager.product_updated, product)
 
     @classmethod
-    def perform_mutation(cls, _root, info, id, input):
+    def perform_mutation(  # type: ignore[override]
+        cls, _root, info: ResolveInfo, /, *, id, input
+    ):
         product = cls.get_node_or_error(info, id, only_type=Product, field="id")
-        errors = defaultdict(list)
+        errors: defaultdict[str, list[ValidationError]] = defaultdict(list)
 
         cleaned_input = cls.clean_channels(
             info,
@@ -368,19 +390,18 @@ class ProductChannelListingUpdate(BaseChannelListingMutation):
         )
 
 
-class ProductVariantChannelListingAddInput(graphene.InputObjectType):
+class ProductVariantChannelListingAddInput(BaseInputObjectType):
     channel_id = graphene.ID(required=True, description="ID of a channel.")
     price = PositiveDecimal(
         required=True, description="Price of the particular variant in channel."
     )
     cost_price = PositiveDecimal(description="Cost price of the variant in channel.")
     preorder_threshold = graphene.Int(
-        description=(
-            "The threshold for preorder variant in channel."
-            + ADDED_IN_31
-            + PREVIEW_FEATURE
-        )
+        description=("The threshold for preorder variant in channel." + ADDED_IN_31)
     )
+
+    class Meta:
+        doc_category = DOC_CATEGORY_PRODUCTS
 
 
 class ProductVariantChannelListingUpdate(BaseMutation):
@@ -407,12 +428,13 @@ class ProductVariantChannelListingUpdate(BaseMutation):
 
     class Meta:
         description = "Manage product variant prices in channels."
+        doc_category = DOC_CATEGORY_PRODUCTS
         permissions = (ProductPermissions.MANAGE_PRODUCTS,)
         error_type_class = ProductChannelListingError
         error_type_field = "product_channel_listing_errors"
 
     @classmethod
-    def clean_channels(cls, info, input, errors: ErrorType) -> List:
+    def clean_channels(cls, info: ResolveInfo, input, errors: ErrorType) -> list:
         add_channels_ids = [
             channel_listing_data["channel_id"] for channel_listing_data in input
         ]
@@ -428,7 +450,7 @@ class ProductVariantChannelListingUpdate(BaseMutation):
                 )
             )
         else:
-            channels: List["ChannelModel"] = []
+            channels: list["ChannelModel"] = []
             if add_channels_ids:
                 channels = cls.get_nodes_or_error(
                     add_channels_ids, "channel_id", Channel
@@ -440,7 +462,7 @@ class ProductVariantChannelListingUpdate(BaseMutation):
 
     @classmethod
     def validate_product_assigned_to_channel(
-        cls, variant: "ProductVariantModel", cleaned_input: List, errors: ErrorType
+        cls, variant: "ProductVariantModel", cleaned_input: list, errors: ErrorType
     ):
         channel_pks = [
             channel_listing_data["channel"].pk for channel_listing_data in cleaned_input
@@ -481,7 +503,7 @@ class ProductVariantChannelListingUpdate(BaseMutation):
             errors[field_name].append(error)
 
     @classmethod
-    def clean_prices(cls, info, cleaned_input, errors: ErrorType) -> List:
+    def clean_prices(cls, info: ResolveInfo, cleaned_input, errors: ErrorType) -> list:
         for channel_listing_data in cleaned_input:
             price = channel_listing_data.get("price")
             cost_price = channel_listing_data.get("cost_price")
@@ -494,13 +516,18 @@ class ProductVariantChannelListingUpdate(BaseMutation):
         return cleaned_input
 
     @classmethod
-    def save(cls, info, variant: "ProductVariantModel", cleaned_input: List):
+    def save(
+        cls, info: ResolveInfo, variant: "ProductVariantModel", cleaned_input: list
+    ):
         with traced_atomic_transaction():
             for channel_listing_data in cleaned_input:
                 channel = channel_listing_data["channel"]
                 defaults = {"currency": channel.currency_code}
                 if "price" in channel_listing_data.keys():
                     defaults["price_amount"] = channel_listing_data.get("price", None)
+                    # set the discounted price the same as price for now, the discounted
+                    # value will be calculated asynchronously in the celery task
+                    defaults["discounted_price_amount"] = defaults["price_amount"]
                 if "cost_price" in channel_listing_data.keys():
                     defaults["cost_price_amount"] = channel_listing_data.get(
                         "cost_price", None
@@ -514,17 +541,21 @@ class ProductVariantChannelListingUpdate(BaseMutation):
                     channel=channel,
                     defaults=defaults,
                 )
-            update_product_discounted_price_task.delay(variant.product_id)
-            manager = load_plugin_manager(info.context)
+            update_products_discounted_prices_for_promotion_task.delay(
+                [variant.product_id]
+            )
+            manager = get_plugin_manager_promise(info.context).get()
             cls.call_event(manager.product_variant_updated, variant)
 
     @classmethod
-    def perform_mutation(cls, _root, info, input, id=None, sku=None):
-        validate_one_of_args_is_in_mutation(ProductErrorCode, "sku", sku, "id", id)
+    def perform_mutation(  # type: ignore[override]
+        cls, _root, info: ResolveInfo, /, *, id=None, input, sku=None
+    ):
+        validate_one_of_args_is_in_mutation("sku", sku, "id", id)
 
         qs = ProductVariantModel.objects.prefetched_for_webhook()
         if id:
-            variant: "ProductVariantModel" = cls.get_node_or_error(  # type: ignore
+            variant = cls.get_node_or_error(
                 info, id, only_type=ProductVariant, field="id", qs=qs
             )
         else:
@@ -538,7 +569,7 @@ class ProductVariantChannelListingUpdate(BaseMutation):
                     }
                 )
 
-        errors = defaultdict(list)
+        errors: defaultdict[str, list[ValidationError]] = defaultdict(list)
 
         cleaned_input = cls.clean_channels(info, input, errors)
         cls.validate_product_assigned_to_channel(variant, cleaned_input, errors)
@@ -554,7 +585,7 @@ class ProductVariantChannelListingUpdate(BaseMutation):
         )
 
 
-class CollectionChannelListingUpdateInput(graphene.InputObjectType):
+class CollectionChannelListingUpdateInput(BaseInputObjectType):
     add_channels = NonNullList(
         PublishableChannelListingInput,
         description="List of channels to which the collection should be assigned.",
@@ -565,6 +596,9 @@ class CollectionChannelListingUpdateInput(graphene.InputObjectType):
         description="List of channels from which the collection should be unassigned.",
         required=False,
     )
+
+    class Meta:
+        doc_category = DOC_CATEGORY_PRODUCTS
 
 
 class CollectionChannelListingUpdate(BaseChannelListingMutation):
@@ -583,12 +617,13 @@ class CollectionChannelListingUpdate(BaseChannelListingMutation):
 
     class Meta:
         description = "Manage collection's availability in channels."
+        doc_category = DOC_CATEGORY_PRODUCTS
         permissions = (ProductPermissions.MANAGE_PRODUCTS,)
         error_type_class = CollectionChannelListingError
         error_type_field = "collection_channel_listing_errors"
 
     @classmethod
-    def add_channels(cls, collection: "CollectionModel", add_channels: List[Dict]):
+    def add_channels(cls, collection: "CollectionModel", add_channels: list[dict]):
         for add_channel in add_channels:
             defaults = {}
             for field in ["is_published", "published_at"]:
@@ -599,21 +634,25 @@ class CollectionChannelListingUpdate(BaseChannelListingMutation):
             )
 
     @classmethod
-    def remove_channels(cls, collection: "CollectionModel", remove_channels: List[int]):
+    def remove_channels(cls, collection: "CollectionModel", remove_channels: list[int]):
         CollectionChannelListing.objects.filter(
             collection=collection, channel_id__in=remove_channels
         ).delete()
 
     @classmethod
-    def save(cls, info, collection: "CollectionModel", cleaned_input: Dict):
+    def save(
+        cls, info: ResolveInfo, collection: "CollectionModel", cleaned_input: dict
+    ):
         with traced_atomic_transaction():
             cls.add_channels(collection, cleaned_input.get("add_channels", []))
             cls.remove_channels(collection, cleaned_input.get("remove_channels", []))
 
     @classmethod
-    def perform_mutation(cls, _root, info, id, input):
+    def perform_mutation(  # type: ignore[override]
+        cls, _root, info: ResolveInfo, /, *, id, input
+    ):
         collection = cls.get_node_or_error(info, id, only_type=Collection, field="id")
-        errors = defaultdict(list)
+        errors: defaultdict[str, list[ValidationError]] = defaultdict(list)
 
         cleaned_input = cls.clean_channels(
             info,

@@ -88,7 +88,6 @@ def test_product_type_create_mutation(
     monkeypatch,
     tax_classes,
 ):
-
     query = PRODUCT_TYPE_CREATE_MUTATION
     product_type_name = "test type"
     slug = "test-type"
@@ -265,16 +264,6 @@ def test_create_product_type_with_rich_text_attribute(
                             "dateTime": None,
                         }
                     },
-                    {
-                        "node": {
-                            "name": "Blue",
-                            "richText": None,
-                            "plainText": None,
-                            "boolean": None,
-                            "date": None,
-                            "dateTime": None,
-                        }
-                    },
                 ]
             },
         },
@@ -413,13 +402,13 @@ def test_create_product_type_with_boolean_attribute(
 
 
 @pytest.mark.parametrize(
-    "input_slug, expected_slug",
-    (
+    ("input_slug", "expected_slug"),
+    [
         ("test-slug", "test-slug"),
         (None, "test-product-type"),
         ("", "test-product-type"),
         ("わたし-わ-にっぽん-です", "わたし-わ-にっぽん-です"),
-    ),
+    ],
 )
 def test_create_product_type_with_given_slug(
     staff_api_client,

@@ -1,5 +1,3 @@
-from __future__ import unicode_literals
-
 import django.core.validators
 import django.db.models.deletion
 import django.utils.timezone
@@ -8,7 +6,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
         ("product", "0001_initial"),

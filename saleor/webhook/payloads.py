@@ -1,9 +1,15 @@
 import json
 import uuid
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import asdict
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, DefaultDict, Dict, Iterable, List, Optional, Set
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Optional,
+    Union,
+)
 
 import graphene
 from django.db.models import F, QuerySet, Sum
@@ -16,6 +22,7 @@ from ..attribute.models import AttributeValueTranslation
 from ..checkout import base_calculations
 from ..checkout.fetch import CheckoutInfo, CheckoutLineInfo
 from ..checkout.models import Checkout
+from ..checkout.utils import get_checkout_metadata
 from ..core.prices import quantize_price, quantize_price_fields
 from ..core.utils import build_absolute_uri
 from ..core.utils.anonymization import (
@@ -25,18 +32,17 @@ from ..core.utils.anonymization import (
 )
 from ..core.utils.json_serializer import CustomJsonEncoder
 from ..discount import VoucherType
-from ..discount.utils import fetch_active_discounts
 from ..order import FulfillmentStatus, OrderStatus
 from ..order.models import Fulfillment, FulfillmentLine, Order, OrderLine
 from ..order.utils import get_order_country
 from ..page.models import Page
 from ..payment import ChargeStatus
-from ..plugins.webhook.utils import from_payment_app_id
 from ..product import ProductMediaTypes
-from ..product.models import Collection, Product
+from ..product.models import Collection, Product, ProductMedia
 from ..shipping.interface import ShippingMethodData
 from ..tax.models import TaxClassCountryRate
 from ..tax.utils import get_charge_taxes_for_order
+from ..thumbnail.models import Thumbnail
 from ..warehouse.models import Stock, Warehouse
 from . import traced_payload_generator
 from .event_types import WebhookEventAsyncType
@@ -44,19 +50,25 @@ from .payload_serializers import PayloadSerializer
 from .serializers import (
     serialize_checkout_lines,
     serialize_checkout_lines_for_tax_calculation,
-    serialize_product_or_variant_attributes,
+    serialize_product_attributes,
+    serialize_variant_attributes,
 )
 
 if TYPE_CHECKING:
     # pylint: disable=unused-import
     from ..product.models import ProductVariant
 
+from ..payment.models import Payment, TransactionItem
 
 if TYPE_CHECKING:
-    from ..discount.models import Sale
+    from ..discount.models import Promotion
     from ..invoice.models import Invoice
-    from ..payment.interface import PaymentData, TransactionActionData
-    from ..payment.models import Payment
+    from ..payment.interface import (
+        PaymentData,
+        PaymentGatewayData,
+        TransactionActionData,
+        TransactionProcessActionData,
+    )
     from ..plugins.base_plugin import RequestorOrLazyObject
     from ..translation.models import Translation
 
@@ -113,7 +125,7 @@ def generate_requestor(requestor: Optional["RequestorOrLazyObject"] = None):
     return {"id": requestor.name, "type": "app"}  # type: ignore
 
 
-def generate_meta(*, requestor_data: Dict[str, Any], camel_case=False, **kwargs):
+def generate_meta(*, requestor_data: dict[str, Any], camel_case=False, **kwargs):
     meta_result = {
         "issued_at": timezone.now().isoformat(),
         "version": __version__,
@@ -138,11 +150,10 @@ def generate_metadata_updated_payload(
 ):
     serializer = PayloadSerializer()
 
-    if isinstance(instance, Checkout):
+    if isinstance(instance, Checkout) or isinstance(instance, TransactionItem):
         pk_field_name = "token"
     else:
         pk_field_name = "id"
-
     return serializer.serialize(
         [instance],
         fields=[],
@@ -156,9 +167,8 @@ def generate_metadata_updated_payload(
 
 def prepare_order_lines_allocations_payload(line):
     warehouse_id_quantity_allocated_map = list(
-        line.allocations.values(  # type: ignore
-            "quantity_allocated",
-            warehouse_id=F("stock__warehouse_id"),
+        line.allocations.values(
+            "quantity_allocated", warehouse_id=F("stock__warehouse_id")
         )
     )
     for item in warehouse_id_quantity_allocated_map:
@@ -241,12 +251,15 @@ def _generate_shipping_method_payload(shipping_method, channel):
     if not shipping_method:
         return None
 
-    serializer = PayloadSerializer()
-    shipping_method_fields = ("name", "type")
-
     shipping_method_channel_listing = shipping_method.channel_listings.filter(
         channel=channel,
     ).first()
+
+    if not shipping_method_channel_listing:
+        return None
+
+    serializer = PayloadSerializer()
+    shipping_method_fields = ("name", "type")
 
     payload = serializer.serialize(
         [shipping_method],
@@ -388,26 +401,26 @@ def _generate_order_payment_payload(payments: Iterable["Payment"]):
 
 
 def _calculate_added(
-    previous_catalogue: DefaultDict[str, Set[str]],
-    current_catalogue: DefaultDict[str, Set[str]],
+    previous_catalogue: defaultdict[str, set[str]],
+    current_catalogue: defaultdict[str, set[str]],
     key: str,
-) -> List[str]:
+) -> list[str]:
     return list(current_catalogue[key] - previous_catalogue[key])
 
 
 def _calculate_removed(
-    previous_catalogue: DefaultDict[str, Set[str]],
-    current_catalogue: DefaultDict[str, Set[str]],
+    previous_catalogue: defaultdict[str, set[str]],
+    current_catalogue: defaultdict[str, set[str]],
     key: str,
-) -> List[str]:
+) -> list[str]:
     return _calculate_added(current_catalogue, previous_catalogue, key)
 
 
 @traced_payload_generator
 def generate_sale_payload(
-    sale: "Sale",
-    previous_catalogue: Optional[DefaultDict[str, Set[str]]] = None,
-    current_catalogue: Optional[DefaultDict[str, Set[str]]] = None,
+    promotion: "Promotion",
+    previous_catalogue: Optional[defaultdict[str, set[str]]] = None,
+    current_catalogue: Optional[defaultdict[str, set[str]]] = None,
     requestor: Optional["RequestorOrLazyObject"] = None,
 ):
     if previous_catalogue is None:
@@ -416,12 +429,12 @@ def generate_sale_payload(
         current_catalogue = defaultdict(set)
 
     serializer = PayloadSerializer()
-    sale_fields = ("id",)
 
     return serializer.serialize(
-        [sale],
-        fields=sale_fields,
+        [promotion],
+        fields=[],
         extra_dict_data={
+            "id": graphene.Node.to_global_id("Sale", promotion.old_sale_id),
             "meta": generate_meta(requestor_data=generate_requestor(requestor)),
             "categories_added": _calculate_added(
                 previous_catalogue, current_catalogue, "categories"
@@ -453,22 +466,22 @@ def generate_sale_payload(
 
 @traced_payload_generator
 def generate_sale_toggle_payload(
-    sale: "Sale",
-    catalogue: DefaultDict[str, Set[str]],
+    promotion: "Promotion",
+    catalogue: defaultdict[str, set[str]],
     requestor: Optional["RequestorOrLazyObject"] = None,
 ):
     serializer = PayloadSerializer()
-    sale_fields = ("id",)
 
     extra_dict_data = {key: list(ids) for key, ids in catalogue.items()}
     extra_dict_data["meta"] = generate_meta(
         requestor_data=generate_requestor(requestor)
     )
-    extra_dict_data["is_active"] = sale.is_active()
+    extra_dict_data["is_active"] = promotion.is_active()
+    extra_dict_data["id"] = graphene.Node.to_global_id("Sale", promotion.old_sale_id)
 
     return serializer.serialize(
-        [sale],
-        fields=sale_fields,
+        [promotion],
+        fields=[],
         extra_dict_data=extra_dict_data,
     )
 
@@ -527,16 +540,13 @@ def generate_checkout_payload(
         "discount_amount",
         "discount_name",
         "language_code",
-        "private_metadata",
-        "metadata",
     )
 
     checkout_price_fields = ("discount_amount",)
     quantize_price_fields(checkout, checkout_price_fields, checkout.currency)
     user_fields = ("email", "first_name", "last_name")
 
-    discounts = fetch_active_discounts()
-    lines_dict_data = serialize_checkout_lines(checkout, discounts)
+    lines_dict_data = serialize_checkout_lines(checkout)
 
     # todo use the most appropriate warehouse
     warehouse = None
@@ -575,6 +585,16 @@ def generate_checkout_payload(
             # We add token as a graphql ID as it worked in that way since we introduce
             # a checkout payload
             "token": graphene.Node.to_global_id("Checkout", checkout.token),
+            "metadata": (
+                lambda c=checkout: get_checkout_metadata(c).metadata
+                if hasattr(c, "metadata_storage")
+                else {}
+            ),
+            "private_metadata": (
+                lambda c=checkout: get_checkout_metadata(c).private_metadata
+                if hasattr(c, "metadata_storage")
+                else {}
+            ),
         },
     )
     return checkout_data
@@ -705,7 +725,7 @@ def generate_product_payload(
         },
         extra_dict_data={
             "meta": generate_meta(requestor_data=generate_requestor(requestor)),
-            "attributes": serialize_product_or_variant_attributes(product),
+            "attributes": serialize_product_attributes(product),
             "media": [
                 {
                     "alt": media_obj.alt,
@@ -720,11 +740,11 @@ def generate_product_payload(
             "charge_taxes": _get_charge_taxes_for_product(product),
             "channel_listings": json.loads(
                 serialize_product_channel_listing_payload(
-                    product.channel_listings.all()  # type: ignore
+                    product.channel_listings.all()
                 )
             ),
             "variants": lambda x: json.loads(
-                (generate_product_variant_payload(x, with_meta=False))
+                generate_product_variant_payload(x, with_meta=False)
             ),
         },
     )
@@ -821,7 +841,7 @@ def generate_product_variant_payload(
 ):
     extra_dict_data = {
         "id": lambda v: v.get_global_id(),
-        "attributes": lambda v: serialize_product_or_variant_attributes(v),
+        "attributes": lambda v: serialize_variant_attributes(v),
         "product_id": lambda v: graphene.Node.to_global_id("Product", v.product_id),
         "media": lambda v: generate_product_variant_media_payload(v),
         "channel_listings": lambda v: json.loads(
@@ -1019,6 +1039,8 @@ def _generate_refund_data_payload(data):
 def generate_payment_payload(
     payment_data: "PaymentData", requestor: Optional["RequestorOrLazyObject"] = None
 ):
+    from .transport.utils import from_payment_app_id
+
     data = asdict(payment_data)
 
     if refund_data := data.get("refund_data"):
@@ -1080,6 +1102,7 @@ def _generate_sample_order_payload(event_name):
     elif event_name in [
         WebhookEventAsyncType.ORDER_CANCELLED,
         WebhookEventAsyncType.ORDER_UPDATED,
+        WebhookEventAsyncType.ORDER_EXPIRED,
     ]:
         order = _get_sample_object(order_qs.filter(status=OrderStatus.CANCELED))
     if order:
@@ -1108,7 +1131,13 @@ def generate_sample_payload(event_name: str) -> Optional[dict]:
         payload = generate_customer_payload(user)
     elif event_name == WebhookEventAsyncType.PRODUCT_CREATED:
         product = _get_sample_object(
-            Product.objects.prefetch_related("category", "collections", "variants")
+            Product.objects.prefetch_related(
+                "category",
+                "collections",
+                "variants",
+                "attributevalues__value",
+                "product_type__attributeproduct__attribute",
+            )
         )
         payload = generate_product_payload(product) if product else None
     elif event_name in checkout_events:
@@ -1196,7 +1225,7 @@ def _generate_payload_for_shipping_method(method: ShippingMethodData):
 @traced_payload_generator
 def generate_excluded_shipping_methods_for_order_payload(
     order: "Order",
-    available_shipping_methods: List[ShippingMethodData],
+    available_shipping_methods: list[ShippingMethodData],
 ):
     order_data = json.loads(generate_order_payload(order))[0]
     payload = {
@@ -1211,10 +1240,10 @@ def generate_excluded_shipping_methods_for_order_payload(
 
 @traced_payload_generator
 def generate_excluded_shipping_methods_for_checkout_payload(
-    checkout_info: "CheckoutInfo",
-    available_shipping_methods: List[ShippingMethodData],
+    checkout: "Checkout",
+    available_shipping_methods: list[ShippingMethodData],
 ):
-    checkout_data = json.loads(generate_checkout_payload(checkout_info.checkout))[0]
+    checkout_data = json.loads(generate_checkout_payload(checkout))[0]
     payload = {
         "checkout": checkout_data,
         "shipping_methods": [
@@ -1233,22 +1262,16 @@ def generate_checkout_payload_for_tax_calculation(
     checkout = checkout_info.checkout
     tax_configuration = checkout_info.tax_configuration
     prices_entered_with_tax = tax_configuration.prices_entered_with_tax
-    discount_infos = fetch_active_discounts()
 
     serializer = PayloadSerializer()
 
-    checkout_fields = (
-        "currency",
-        "metadata",
-    )
+    checkout_fields = ("currency",)
 
     # Prepare checkout data
     address = checkout_info.shipping_address or checkout_info.billing_address
 
     total_amount = quantize_price(
-        base_calculations.base_checkout_total(
-            checkout_info, discount_infos, lines
-        ).amount,
+        base_calculations.base_checkout_total(checkout_info, lines).amount,
         checkout.currency,
     )
 
@@ -1261,8 +1284,12 @@ def generate_checkout_payload_for_tax_calculation(
         user_public_metadata = user.metadata
 
     # Prepare discount data
-    is_shipping_voucher = (
-        checkout_info.voucher.type == VoucherType.SHIPPING
+    # total_amount include the specific product and apply once per order discounts,
+    # so we need to attach only entire order discount here with once per order flag
+    # set to False
+    discount_not_included = (
+        checkout_info.voucher.type == VoucherType.ENTIRE_ORDER
+        and checkout_info.voucher.apply_once_per_order is False
         if checkout_info.voucher
         else False
     )
@@ -1270,7 +1297,7 @@ def generate_checkout_payload_for_tax_calculation(
     discount_name = checkout.discount_name
     discounts = (
         [{"name": discount_name, "amount": discount_amount}]
-        if discount_amount and not is_shipping_voucher
+        if discount_amount and discount_not_included
         else []
     )
 
@@ -1283,15 +1310,18 @@ def generate_checkout_payload_for_tax_calculation(
         base_calculations.base_checkout_delivery_price(checkout_info, lines).amount,
         checkout.currency,
     )
+    is_shipping_voucher = (
+        checkout_info.voucher.type == VoucherType.SHIPPING
+        if checkout_info.voucher
+        else False
+    )
     if is_shipping_voucher:
         shipping_method_amount = max(
             shipping_method_amount - discount_amount, Decimal("0.0")
         )
 
     # Prepare line data
-    lines_dict_data = serialize_checkout_lines_for_tax_calculation(
-        checkout_info, lines, discount_infos
-    )
+    lines_dict_data = serialize_checkout_lines_for_tax_calculation(checkout_info, lines)
 
     checkout_data = serializer.serialize(
         [checkout],
@@ -1310,6 +1340,11 @@ def generate_checkout_payload_for_tax_calculation(
             "shipping_name": shipping_method_name,
             "discounts": discounts,
             "lines": lines_dict_data,
+            "metadata": (
+                lambda c=checkout: get_checkout_metadata(c).metadata
+                if hasattr(c, "metadata_storage")
+                else {}
+            ),
         },
     )
     return checkout_data
@@ -1438,9 +1473,11 @@ def generate_transaction_action_request_payload(
             "currency": transaction.currency,
         },
         "transaction": {
-            "status": transaction.status,
-            "type": transaction.type,
-            "reference": transaction.reference,
+            "type": transaction.name,
+            "name": transaction.name,
+            "message": transaction.message,
+            "reference": transaction.psp_reference,
+            "psp_reference": transaction.psp_reference,
             "available_actions": transaction.available_actions,
             "currency": transaction.currency,
             "charged_value": quantize_price(
@@ -1452,8 +1489,8 @@ def generate_transaction_action_request_payload(
             "refunded_value": quantize_price(
                 transaction.refunded_value, transaction.currency
             ),
-            "voided_value": quantize_price(
-                transaction.voided_value, transaction.currency
+            "canceled_value": quantize_price(
+                transaction.canceled_value, transaction.currency
             ),
             "order_id": graphql_order_id,
             "checkout_id": graphql_checkout_id,
@@ -1463,3 +1500,38 @@ def generate_transaction_action_request_payload(
         "meta": generate_meta(requestor_data=generate_requestor(requestor)),
     }
     return json.dumps(payload, cls=CustomJsonEncoder)
+
+
+def generate_transaction_session_payload(
+    transaction_process_action: "TransactionProcessActionData",
+    transaction: "TransactionItem",
+    transaction_object: Union["Order", "Checkout"],
+    payment_gateway: "PaymentGatewayData",
+):
+    transaction_object_id = graphene.Node.to_global_id(
+        transaction_object.__class__.__name__, transaction_object.pk
+    )
+
+    payload = {
+        "id": transaction_object_id,
+        "data": payment_gateway.data,
+        "amount": transaction_process_action.amount,
+        "currency": transaction_process_action.currency,
+        "action_type": transaction_process_action.action_type.upper(),
+        "transaction_id": graphene.Node.to_global_id(
+            "TransactionItem", transaction.token
+        ),
+    }
+    return json.dumps(payload, cls=CustomJsonEncoder)
+
+
+@traced_payload_generator
+def generate_thumbnail_payload(thumbnail: Thumbnail):
+    thumbnail_id = graphene.Node.to_global_id("Thumbnail", thumbnail.id)
+    return json.dumps({"id": thumbnail_id})
+
+
+@traced_payload_generator
+def generate_product_media_payload(media: ProductMedia):
+    product_media_id = graphene.Node.to_global_id("ProductMedia", media.id)
+    return json.dumps({"id": product_media_id})

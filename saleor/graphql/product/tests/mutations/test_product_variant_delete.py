@@ -22,11 +22,15 @@ DELETE_VARIANT_BY_SKU_MUTATION = """
 """
 
 
+@patch(
+    "saleor.product.tasks.update_products_discounted_prices_for_promotion_task.delay"
+)
 @patch("saleor.plugins.manager.PluginsManager.product_variant_deleted")
 @patch("saleor.order.tasks.recalculate_orders_task.delay")
 def test_delete_variant_by_sku(
     mocked_recalculate_orders_task,
     product_variant_deleted_webhook_mock,
+    update_products_discounted_prices_for_promotion_task_mock,
     staff_api_client,
     product,
     permission_manage_products,
@@ -52,6 +56,9 @@ def test_delete_variant_by_sku(
     with pytest.raises(variant._meta.model.DoesNotExist):
         variant.refresh_from_db()
     mocked_recalculate_orders_task.assert_not_called()
+    update_products_discounted_prices_for_promotion_task_mock.assert_called_once_with(
+        [product.id]
+    )
 
 
 DELETE_VARIANT_MUTATION = """
@@ -66,11 +73,15 @@ DELETE_VARIANT_MUTATION = """
 """
 
 
+@patch(
+    "saleor.product.tasks.update_products_discounted_prices_for_promotion_task.delay"
+)
 @patch("saleor.plugins.manager.PluginsManager.product_variant_deleted")
 @patch("saleor.order.tasks.recalculate_orders_task.delay")
 def test_delete_variant(
     mocked_recalculate_orders_task,
     product_variant_deleted_webhook_mock,
+    update_products_discounted_prices_for_promotion_task_mock,
     staff_api_client,
     product,
     permission_manage_products,
@@ -92,6 +103,9 @@ def test_delete_variant(
     with pytest.raises(variant._meta.model.DoesNotExist):
         variant.refresh_from_db()
     mocked_recalculate_orders_task.assert_not_called()
+    update_products_discounted_prices_for_promotion_task_mock.assert_called_once_with(
+        [product.id]
+    )
 
 
 def test_delete_variant_remove_checkout_lines(
@@ -173,7 +187,7 @@ def test_delete_variant_in_draft_order(
     variables = {"id": variant_id}
 
     product = variant.product
-    net = variant.get_price(product, [], channel_USD, variant_channel_listing, None)
+    net = variant.get_price(variant_channel_listing)
     gross = Money(amount=net.amount, currency=net.currency)
     order_not_draft = order_list[-1]
     unit_price = TaxedMoney(net=net, gross=gross)
@@ -374,8 +388,7 @@ def test_delete_variant_delete_product_channel_listing_without_available_channel
     product,
     permission_manage_products,
 ):
-    """Ensure that when the last available variant for channel is removed,
-    the corresponging product channel listings will be removed too."""
+    """Test that the product is unlisted if all listed variants are removed."""
     # given
     query = DELETE_VARIANT_MUTATION
     variant = product.variants.first()
@@ -416,8 +429,7 @@ def test_delete_variant_delete_product_channel_listing_not_deleted(
     product_with_two_variants,
     permission_manage_products,
 ):
-    """Ensure that any other available variant for channel exist,
-    the corresponging product channel listings will be not removed."""
+    """Test that the product listing persists if any variant listings remain."""
     # given
     query = DELETE_VARIANT_MUTATION
     product = product_with_two_variants
@@ -445,3 +457,97 @@ def test_delete_variant_delete_product_channel_listing_not_deleted(
     mocked_recalculate_orders_task.assert_not_called()
     product.refresh_from_db()
     assert product.channel_listings.count() == product_channel_listing_count
+
+
+DELETE_VARIANT_BY_EXTERNAL_REFERENCE = """
+    mutation variantDelete($id: ID, $externalReference: String) {
+        productVariantDelete(id: $id, externalReference: $externalReference) {
+            productVariant {
+                externalReference
+                id
+            }
+            errors {
+                field
+                message
+            }
+        }
+    }
+"""
+
+
+@patch("saleor.plugins.manager.PluginsManager.product_variant_deleted")
+@patch("saleor.order.tasks.recalculate_orders_task.delay")
+def test_delete_variant_by_external_reference(
+    mocked_recalculate_orders_task,
+    product_variant_deleted_webhook_mock,
+    staff_api_client,
+    product,
+    permission_manage_products,
+):
+    # given
+    query = DELETE_VARIANT_BY_EXTERNAL_REFERENCE
+    ext_ref = "test-ext-ref"
+    variant = product.variants.first()
+    variant.external_reference = ext_ref
+    variant.save(update_fields=["external_reference"])
+    variables = {"externalReference": ext_ref}
+
+    # when
+    response = staff_api_client.post_graphql(
+        query,
+        variables,
+        permissions=[permission_manage_products],
+    )
+    content = get_graphql_content(response)
+    flush_post_commit_hooks()
+    data = content["data"]["productVariantDelete"]
+
+    # then
+    product_variant_deleted_webhook_mock.assert_called_once_with(variant)
+    assert data["productVariant"]["externalReference"] == ext_ref
+    assert data["productVariant"]["id"] == graphene.Node.to_global_id(
+        variant._meta.model.__name__, variant.id
+    )
+    with pytest.raises(variant._meta.model.DoesNotExist):
+        variant.refresh_from_db()
+    mocked_recalculate_orders_task.assert_not_called()
+
+
+def test_delete_product_by_both_id_and_external_reference(
+    staff_api_client, permission_manage_products
+):
+    # given
+    query = DELETE_VARIANT_BY_EXTERNAL_REFERENCE
+    variables = {"externalReference": "whatever", "id": "whatever"}
+
+    # when
+    response = staff_api_client.post_graphql(
+        query, variables, permissions=[permission_manage_products]
+    )
+    content = get_graphql_content(response)
+
+    # then
+    errors = content["data"]["productVariantDelete"]["errors"]
+    assert (
+        errors[0]["message"]
+        == "Argument 'id' cannot be combined with 'external_reference'"
+    )
+
+
+def test_delete_product_by_external_reference_not_existing(
+    staff_api_client, permission_manage_products
+):
+    # given
+    query = DELETE_VARIANT_BY_EXTERNAL_REFERENCE
+    ext_ref = "non-existing-ext-ref"
+    variables = {"externalReference": ext_ref}
+
+    # when
+    response = staff_api_client.post_graphql(
+        query, variables, permissions=[permission_manage_products]
+    )
+    content = get_graphql_content(response)
+
+    # then
+    errors = content["data"]["productVariantDelete"]["errors"]
+    assert errors[0]["message"] == f"Couldn't resolve to a node: {ext_ref}"

@@ -1,4 +1,5 @@
-from typing import TYPE_CHECKING, Iterable, List, Optional, Tuple
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Optional
 
 from ...attribute import AttributeType
 
@@ -20,8 +21,7 @@ def generate_and_set_variant_name(
     attribute_rel: AssignedVariantAttribute
     for attribute_rel in variant_selection_attributes.iterator():
         values_qs = attribute_rel.values.all()
-        translated_values = [str(value.translated) for value in values_qs]
-        attributes_display.append(", ".join(translated_values))
+        attributes_display.append(", ".join([str(value) for value in values_qs]))
 
     name = " / ".join(sorted(attributes_display))
     if not name:
@@ -34,8 +34,8 @@ def generate_and_set_variant_name(
 
 
 def get_variant_selection_attributes(
-    attributes: Iterable[Tuple["Attribute", bool]]
-) -> List[Tuple["Attribute", bool]]:
+    attributes: Iterable[tuple["Attribute", bool]],
+) -> list[tuple["Attribute", bool]]:
     """Return attributes that can be used in variant selection.
 
     Attribute must be product attribute and attribute input type must be

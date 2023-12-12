@@ -1,21 +1,25 @@
+from typing import Any
+
 import graphene
 
-from ....core.permissions import OrderPermissions
 from ....order import FulfillmentStatus
 from ....order import models as order_models
 from ....order.actions import create_fulfillments_for_returned_products
 from ....payment import PaymentError
-from ...app.dataloaders import load_app
+from ....permission.enums import OrderPermissions
+from ...app.dataloaders import get_app_promise
+from ...core import ResolveInfo
+from ...core.doc_category import DOC_CATEGORY_ORDERS
 from ...core.scalars import PositiveDecimal
-from ...core.types import NonNullList, OrderError
-from ...plugins.dataloaders import load_plugin_manager
+from ...core.types import BaseInputObjectType, NonNullList, OrderError
+from ...plugins.dataloaders import get_plugin_manager_promise
 from ..types import Fulfillment, Order
 from .fulfillment_refund_and_return_product_base import (
     FulfillmentRefundAndReturnProductBase,
 )
 
 
-class OrderReturnLineInput(graphene.InputObjectType):
+class OrderReturnLineInput(BaseInputObjectType):
     order_line_id = graphene.ID(
         description="The ID of the order line to return.",
         name="orderLineId",
@@ -30,8 +34,11 @@ class OrderReturnLineInput(graphene.InputObjectType):
         default_value=False,
     )
 
+    class Meta:
+        doc_category = DOC_CATEGORY_ORDERS
 
-class OrderReturnFulfillmentLineInput(graphene.InputObjectType):
+
+class OrderReturnFulfillmentLineInput(BaseInputObjectType):
     fulfillment_line_id = graphene.ID(
         description="The ID of the fulfillment line to return.",
         name="fulfillmentLineId",
@@ -46,8 +53,11 @@ class OrderReturnFulfillmentLineInput(graphene.InputObjectType):
         default_value=False,
     )
 
+    class Meta:
+        doc_category = DOC_CATEGORY_ORDERS
 
-class OrderReturnProductsInput(graphene.InputObjectType):
+
+class OrderReturnProductsInput(BaseInputObjectType):
     order_lines = NonNullList(
         OrderReturnLineInput,
         description="List of unfulfilled lines to return.",
@@ -72,6 +82,9 @@ class OrderReturnProductsInput(graphene.InputObjectType):
         default_value=False,
     )
 
+    class Meta:
+        doc_category = DOC_CATEGORY_ORDERS
+
 
 class FulfillmentReturnProducts(FulfillmentRefundAndReturnProductBase):
     return_fulfillment = graphene.Field(
@@ -88,6 +101,7 @@ class FulfillmentReturnProducts(FulfillmentRefundAndReturnProductBase):
 
     class Meta:
         description = "Return products."
+        doc_category = DOC_CATEGORY_ORDERS
         permissions = (OrderPermissions.MANAGE_ORDERS,)
         error_type_class = OrderError
         error_type_field = "order_errors"
@@ -102,8 +116,8 @@ class FulfillmentReturnProducts(FulfillmentRefundAndReturnProductBase):
         )
 
     @classmethod
-    def clean_input(cls, info, order_id, input):
-        cleaned_input = {}
+    def clean_input(cls, info: ResolveInfo, order_id, input):
+        cleaned_input: dict[str, Any] = {}
         amount_to_refund = input.get("amount_to_refund")
         include_shipping_costs = input["include_shipping_costs"]
         refund = input["refund"]
@@ -114,18 +128,11 @@ class FulfillmentReturnProducts(FulfillmentRefundAndReturnProductBase):
         )
         if refund:
             payment = order.get_last_payment()
-            transactions = list(order.payment_transactions.all())
-            if transactions:
-                # For know we handle refunds only for last transaction. We need to add
-                # an interface to process a refund requests on multiple transactions
-                charged_value = transactions[-1].charged_value
-            else:
-                cls.clean_order_payment(payment, cleaned_input)
-                charged_value = payment.captured_amount
+            cls.clean_order_payment(payment, cleaned_input)
+            charged_value = payment.captured_amount
             cls.clean_amount_to_refund(
                 order, amount_to_refund, charged_value, cleaned_input
             )
-            cleaned_input["transactions"] = transactions
 
         cleaned_input.update(
             {
@@ -153,18 +160,18 @@ class FulfillmentReturnProducts(FulfillmentRefundAndReturnProductBase):
         return cleaned_input
 
     @classmethod
-    def perform_mutation(cls, _root, info, **data):
+    def perform_mutation(cls, _root, info: ResolveInfo, /, **data):
         cleaned_input = cls.clean_input(info, data.get("order"), data.get("input"))
         order = cleaned_input["order"]
-        manager = load_plugin_manager(info.context)
+        cls.check_channel_permissions(info, [order.channel_id])
+        manager = get_plugin_manager_promise(info.context).get()
         try:
-            app = load_app(info.context)
+            app = get_app_promise(info.context).get()
             response = create_fulfillments_for_returned_products(
                 info.context.user,
                 app,
                 order,
                 cleaned_input.get("payment"),
-                cleaned_input.get("transactions"),
                 cleaned_input.get("order_lines", []),
                 cleaned_input.get("fulfillment_lines", []),
                 manager,
@@ -173,7 +180,7 @@ class FulfillmentReturnProducts(FulfillmentRefundAndReturnProductBase):
                 cleaned_input["include_shipping_costs"],
             )
         except PaymentError:
-            cls.raise_error_for_payment_error(cleaned_input.get("transactions"))
+            cls.raise_error_for_payment_error()
 
         return_fulfillment, replace_fulfillment, replace_order = response
         return cls(

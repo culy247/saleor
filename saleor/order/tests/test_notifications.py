@@ -7,6 +7,10 @@ from django.core.files import File
 from measurement.measures import Weight
 from prices import Money, fixed_discount
 
+from ...attribute.tests.model_helpers import (
+    get_product_attribute_values,
+    get_product_attributes,
+)
 from ...core.notify_events import NotifyEventType
 from ...core.prices import quantize_price
 from ...core.tests.utils import get_site_context_payload
@@ -96,20 +100,21 @@ def test_get_custom_order_payload(order, site_settings):
 
 
 def test_get_order_line_payload(order_line):
-    order_line.variant.product.weight = Weight(kg=5)
-    order_line.variant.product.save()
+    product = order_line.variant.product
+    product.weight = Weight(kg=5)
+    product.save()
 
     payload = get_order_line_payload(order_line)
 
-    attributes = order_line.variant.product.attributes.all()
+    attributes = get_product_attributes(product)
     expected_attributes_payload = []
     for attr in attributes:
         expected_attributes_payload.append(
             {
                 "assignment": {
                     "attribute": {
-                        "slug": attr.assignment.attribute.slug,
-                        "name": attr.assignment.attribute.name,
+                        "slug": attr.slug,
+                        "name": attr.name,
                     }
                 },
                 "values": [
@@ -119,7 +124,7 @@ def test_get_order_line_payload(order_line):
                         "slug": value.slug,
                         "file_url": value.file_url,
                     }
-                    for value in attr.values.all()
+                    for value in get_product_attribute_values(product, attr)
                 ],
             }
         )
@@ -172,11 +177,12 @@ def test_get_order_line_payload(order_line):
         "total_tax_amount": quantize_price(total_tax.amount, currency),
         "tax_rate": order_line.tax_rate,
         "is_digital": order_line.is_digital,
-        "digital_url": "",
+        "digital_url": None,
         "unit_discount_amount": order_line.unit_discount_amount,
         "unit_discount_reason": order_line.unit_discount_reason,
         "unit_discount_type": order_line.unit_discount_type,
         "unit_discount_value": order_line.unit_discount_value,
+        "metadata": order_line.metadata,
     }
 
 
@@ -223,7 +229,6 @@ def test_get_default_order_payload(order_line):
         value=value,
         reason="Discount reason",
         amount=(order.undiscounted_total - order.total).gross,
-        # type: ignore
     )
     order.save()
 
@@ -438,7 +443,6 @@ def test_send_confirmation_emails_without_addresses_for_order(
     digital_content,
     anonymous_plugins,
 ):
-
     assert not order.lines.count()
     line_data = OrderLineData(
         variant_id=str(digital_content.product_variant.id),
@@ -678,4 +682,7 @@ def test_get_default_images_payload(product_with_image):
     # then
     images_payload = payload["first_image"]["original"]
     for th_size in THUMBNAIL_SIZES:
-        assert images_payload[th_size] == f"/thumbnail/{media_id}/{th_size}/"
+        assert (
+            images_payload[str(th_size)]
+            == f"http://mirumee.com/thumbnail/{media_id}/{th_size}/"
+        )

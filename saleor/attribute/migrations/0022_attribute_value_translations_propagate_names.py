@@ -2,7 +2,7 @@
 
 import re
 import warnings
-from typing import Dict, Optional
+from typing import Optional
 
 from django.db import migrations
 from django.template.defaultfilters import truncatechars
@@ -14,7 +14,7 @@ BLACKLISTED_URL_SCHEMES = ("javascript",)
 HYPERLINK_TAG_WITH_URL_PATTERN = r"(.*?<a\s+href=\\?\")(\w+://\S+[^\\])(\\?\">)"
 
 
-def clean_editor_js(definitions: Optional[Dict], *, to_string: bool = False):
+def clean_editor_js(definitions: Optional[dict], *, to_string: bool = False):
     """Sanitize a given EditorJS JSON definitions.
 
     Look for not allowed URLs, replaced them with `invalid` value, and clean valid ones.
@@ -136,7 +136,6 @@ def propagate_names_for_rich_text_attribute_value_translations(apps, schema_edit
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("attribute", "0021_auto_20220406_1713"),
     ]

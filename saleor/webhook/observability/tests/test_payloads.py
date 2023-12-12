@@ -42,7 +42,7 @@ from ..utils import GraphQLOperationResponse
 
 
 @pytest.mark.parametrize(
-    "snake_payload,expected_camel",
+    ("snake_payload", "expected_camel"),
     [
         (
             ApiCallRequest(
@@ -214,13 +214,21 @@ def test_serialize_gql_operation_results_when_too_low_bytes_limit(
 
 
 @pytest.mark.parametrize(
-    "headers,expected",
+    ("headers", "expected"),
     [
         ({}, []),
         (None, []),
         (
-            {"Content-Length": "19", "Content-Type": "application/json"},
-            [("Content-Length", "19"), ("Content-Type", "application/json")],
+            {
+                "Authorization": "secret",
+                "Content-Length": "19",
+                "Content-Type": "application/json",
+            },
+            [
+                ("Authorization", MASK),
+                ("Content-Length", "19"),
+                ("Content-Type", "application/json"),
+            ],
         ),
     ],
 )
@@ -409,7 +417,7 @@ def test_generate_event_delivery_attempt_payload_raises_error_when_no_delivery(
     event_attempt,
 ):
     event_attempt.delivery = None
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Can't generate payload."):
         generate_event_delivery_attempt_payload(event_attempt, None, 1024)
 
 
@@ -417,7 +425,7 @@ def test_generate_event_delivery_attempt_payload_raises_error_when_no_payload(
     event_attempt,
 ):
     event_attempt.delivery.payload = None
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Can't generate payload."):
         generate_event_delivery_attempt_payload(event_attempt, None, 1024)
 
 
@@ -432,9 +440,7 @@ def test_generate_event_delivery_attempt_payload_with_next_retry_date(
     assert payload["next_retry"] == next_retry_date
 
 
-def test_generate_event_delivery_attempt_payload_with_non_empty_headers(
-    event_attempt,
-):
+def test_generate_event_delivery_attempt_payload_with_non_empty_headers(event_attempt):
     headers = {"Content-Length": "19", "Content-Type": "application/json"}
     headers_list = [("Content-Length", "19"), ("Content-Type", "application/json")]
     event_attempt.request_headers = json.dumps(headers)
@@ -460,3 +466,15 @@ def test_generate_event_delivery_attempt_payload_with_subscription_query(
 
     assert payload["webhook"]["subscription_query"].text == query
     assert payload["event_delivery"]["payload"]["body"].text == pretty_json(MASK)
+
+
+def test_generate_event_delivery_attempt_payload_target_url_obfuscated(
+    webhook, event_attempt
+):
+    webhook.target_url = "http://user:password@example.com/webhooks"
+
+    payload = generate_event_delivery_attempt_payload(event_attempt, None, 1024)
+
+    assert (
+        payload["webhook"]["target_url"] == f"http://user:{MASK}@example.com/webhooks"
+    )

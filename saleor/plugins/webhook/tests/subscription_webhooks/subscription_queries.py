@@ -1,5 +1,163 @@
 from .....graphql.tests.queries import fragments
 
+ACCOUNT_CONFIRMATION_REQUESTED = (
+    fragments.CUSTOMER_DETAILS
+    + """
+    subscription{
+      event{
+        ...on AccountConfirmationRequested{
+          user{
+            ...CustomerDetails
+          }
+          token
+          redirectUrl
+          channel{
+            slug
+            id
+          }
+          shop{
+            domain{
+                host
+                url
+            }
+          }
+        }
+      }
+    }
+"""
+)
+
+ACCOUNT_CONFIRMED = (
+    fragments.CUSTOMER_DETAILS
+    + """
+    subscription{
+      event{
+        ...on AccountConfirmed{
+          user{
+            ...CustomerDetails
+          }
+        }
+      }
+    }
+"""
+)
+
+
+ACCOUNT_CHANGE_EMAIL_REQUESTED = (
+    fragments.CUSTOMER_DETAILS
+    + """
+    subscription{
+      event{
+        ...on AccountChangeEmailRequested{
+          user{
+            ...CustomerDetails
+          }
+          token
+          redirectUrl
+          channel{
+            slug
+            id
+          }
+          shop{
+            domain{
+                host
+                url
+            }
+          }
+          newEmail
+        }
+      }
+    }
+"""
+)
+
+
+ACCOUNT_EMAIL_CHANGED = (
+    fragments.CUSTOMER_DETAILS
+    + """
+    subscription{
+      event{
+        ...on AccountEmailChanged{
+          user{
+            ...CustomerDetails
+          }
+        }
+      }
+    }
+"""
+)
+
+
+ACCOUNT_DELETE_REQUESTED = (
+    fragments.CUSTOMER_DETAILS
+    + """
+    subscription{
+      event{
+        ...on AccountDeleteRequested{
+          user{
+            ...CustomerDetails
+          }
+          token
+          redirectUrl
+          channel{
+            slug
+            id
+          }
+          shop{
+            domain{
+                host
+                url
+            }
+          }
+        }
+      }
+    }
+"""
+)
+
+ACCOUNT_SET_PASSWORD_REQUESTED = (
+    fragments.CUSTOMER_DETAILS
+    + """
+    subscription{
+      event{
+        ...on AccountSetPasswordRequested{
+          user{
+            ...CustomerDetails
+          }
+          token
+          redirectUrl
+          channel{
+            slug
+            id
+          }
+          shop{
+            domain{
+                host
+                url
+            }
+          }
+        }
+      }
+    }
+"""
+)
+
+ACCOUNT_DELETED = (
+    fragments.CUSTOMER_DETAILS
+    + """
+    subscription{
+      event{
+        ...on AccountDeleted{
+          user{
+            ...CustomerDetails
+          }
+        }
+      }
+    }
+"""
+)
+
+
 ADDRESS_CREATED = (
     fragments.ADDRESS_DETAILS
     + """
@@ -253,6 +411,24 @@ GIFT_CARD_DELETED = (
 )
 
 
+GIFT_CARD_SENT = (
+    fragments.GIFT_CARD_DETAILS
+    + """
+    subscription{
+      event{
+        ...on GiftCardSent {
+          giftCard{
+            ...GiftCardDetails
+          }
+          channel
+          sentToEmail
+        }
+      }
+    }
+"""
+)
+
+
 GIFT_CARD_STATUS_CHANGED = (
     fragments.GIFT_CARD_DETAILS
     + """
@@ -276,6 +452,21 @@ GIFT_CARD_METADATA_UPDATED = (
         ...on GiftCardMetadataUpdated{
           giftCard{
             ...GiftCardDetails
+          }
+        }
+      }
+    }
+"""
+)
+
+GIFT_CARD_EXPORT_COMPLETED = (
+    fragments.GIFT_CARD_EXPORT_DETAILS
+    + """
+    subscription{
+      event{
+        ...on GiftCardExportCompleted{
+          export{
+            ...GiftCardExportDetails
           }
         }
       }
@@ -377,6 +568,35 @@ VOUCHER_METADATA_UPDATED = (
     }
 """
 )
+
+
+VOUCHER_CODE_EXPORT_COMPLETED = (
+    fragments.VOUCHER_CODE_EXPORT_DETAILS
+    + """
+    subscription{
+      event{
+        ...on VoucherCodeExportCompleted{
+          export{
+            ...VoucherCodeExportDetails
+          }
+        }
+      }
+    }
+"""
+)
+
+
+SHOP_METADATA_UPDATED = """
+    subscription{
+      event {
+        ...on ShopMetadataUpdated{
+          shop {
+            id
+          }
+        }
+      }
+    }
+"""
 
 
 CHANNEL_CREATED = """
@@ -640,6 +860,34 @@ STAFF_DELETED = (
 )
 
 
+STAFF_SET_PASSWORD_REQUESTED = (
+    fragments.CUSTOMER_DETAILS
+    + """
+    subscription{
+      event{
+        ...on StaffSetPasswordRequested{
+          user{
+            ...CustomerDetails
+          }
+          token
+          redirectUrl
+          channel{
+            slug
+            id
+          }
+          shop{
+            domain{
+                host
+                url
+            }
+          }
+        }
+      }
+    }
+"""
+)
+
+
 PRODUCT_UPDATED = """
     subscription{
       event{
@@ -682,6 +930,63 @@ PRODUCT_METADATA_UPDATED = """
         ...on ProductMetadataUpdated{
           product{
             id
+          }
+        }
+      }
+    }
+"""
+
+PRODUCT_EXPORT_COMPLETED = (
+    fragments.PRODUCT_EXPORT_DETAILS
+    + """
+    subscription{
+      event{
+        ...on ProductExportCompleted{
+          export{
+            ...ProductExportDetails
+          }
+        }
+      }
+    }
+"""
+)
+
+PRODUCT_MEDIA_CREATED = """
+    subscription{
+      event{
+        ...on ProductMediaCreated{
+          productMedia{
+            id
+            url(size: 0)
+            productId
+          }
+        }
+      }
+    }
+"""
+
+PRODUCT_MEDIA_UPDATED = """
+    subscription{
+      event{
+        ...on ProductMediaUpdated{
+          productMedia{
+            id
+            url(size: 0)
+            productId
+          }
+        }
+      }
+    }
+"""
+
+PRODUCT_MEDIA_DELETED = """
+    subscription{
+      event{
+        ...on ProductMediaDeleted{
+          productMedia{
+            id
+            url(size: 0)
+            productId
           }
         }
       }
@@ -761,6 +1066,21 @@ PRODUCT_VARIANT_BACK_IN_STOCK = """
     }
 """
 
+PRODUCT_VARIANT_STOCK_UPDATED = """
+    subscription{
+      event{
+        ...on ProductVariantStockUpdated{
+          productVariant{
+            id
+          }
+          warehouse{
+            id
+          }
+        }
+      }
+    }
+"""
+
 ORDER_CREATED = """
     subscription{
       event{
@@ -809,6 +1129,42 @@ ORDER_FULLY_PAID = """
     }
 """
 
+ORDER_PAID = """
+    subscription{
+      event{
+        ...on OrderPaid{
+          order{
+            id
+          }
+        }
+      }
+    }
+"""
+
+ORDER_FULLY_REFUNDED = """
+    subscription{
+      event{
+        ...on OrderFullyRefunded{
+          order{
+            id
+          }
+        }
+      }
+    }
+"""
+
+ORDER_REFUNDED = """
+    subscription{
+      event{
+        ...on OrderRefunded{
+          order{
+            id
+          }
+        }
+      }
+    }
+"""
+
 ORDER_CANCELLED = """
     subscription{
       event{
@@ -820,6 +1176,20 @@ ORDER_CANCELLED = """
       }
     }
 """
+
+
+ORDER_EXPIRED = """
+    subscription{
+      event{
+        ...on OrderExpired{
+          order{
+            id
+          }
+        }
+      }
+    }
+"""
+
 
 ORDER_FULFILLED = """
     subscription{
@@ -838,6 +1208,18 @@ ORDER_METADATA_UPDATED = """
       event{
         ...on OrderMetadataUpdated{
           order{
+            id
+          }
+        }
+      }
+    }
+"""
+
+ORDER_BULK_CREATED = """
+    subscription{
+      event{
+        ...on OrderBulkCreated{
+          orders{
             id
           }
         }
@@ -942,14 +1324,143 @@ SALE_TOGGLE = (
 """
 )
 
+
+PROMOTION_CREATED = (
+    fragments.PROMOTION_DETAILS
+    + """
+    subscription{
+      event{
+        ...on PromotionCreated{
+          promotion{
+            ...PromotionDetails
+          }
+        }
+      }
+    }
+"""
+)
+
+PROMOTION_UPDATED = (
+    fragments.PROMOTION_DETAILS
+    + """
+    subscription{
+      event{
+        ...on PromotionUpdated{
+          promotion{
+            ...PromotionDetails
+          }
+        }
+      }
+    }
+"""
+)
+
+PROMOTION_DELETED = (
+    fragments.PROMOTION_DETAILS
+    + """
+    subscription{
+      event{
+        ...on PromotionDeleted{
+          promotion{
+            ...PromotionDetails
+          }
+        }
+      }
+    }
+"""
+)
+
+
+PROMOTION_STARTED = (
+    fragments.PROMOTION_DETAILS
+    + """
+    subscription{
+      event{
+        ...on PromotionStarted{
+          promotion{
+            ...PromotionDetails
+          }
+        }
+      }
+    }
+"""
+)
+
+
+PROMOTION_ENDED = (
+    fragments.PROMOTION_DETAILS
+    + """
+    subscription{
+      event{
+        ...on PromotionEnded{
+          promotion{
+            ...PromotionDetails
+          }
+        }
+      }
+    }
+"""
+)
+
+
+PROMOTION_RULE_CREATED = (
+    fragments.PROMOTION_RULE_DETAILS
+    + """
+    subscription{
+      event{
+        ...on PromotionRuleCreated{
+          promotionRule{
+            ...PromotionRuleDetails
+          }
+        }
+      }
+    }
+"""
+)
+
+PROMOTION_RULE_UPDATED = (
+    fragments.PROMOTION_RULE_DETAILS
+    + """
+    subscription{
+      event{
+        ...on PromotionRuleUpdated{
+          promotionRule{
+            ...PromotionRuleDetails
+          }
+        }
+      }
+    }
+"""
+)
+
+PROMOTION_RULE_DELETED = (
+    fragments.PROMOTION_RULE_DETAILS
+    + """
+    subscription{
+      event{
+        ...on PromotionRuleDeleted{
+          promotionRule{
+            ...PromotionRuleDetails
+          }
+        }
+      }
+    }
+"""
+)
+
+
 INVOICE_REQUESTED = (
     fragments.INVOICE_DETAILS
+    + fragments.INVOICE_ORDER_DETAILS
     + """
     subscription{
       event{
         ...on InvoiceRequested{
           invoice{
             ...InvoiceDetails
+          }
+          order {
+            ...InvoiceOrderDetails
           }
         }
       }
@@ -959,12 +1470,16 @@ INVOICE_REQUESTED = (
 
 INVOICE_DELETED = (
     fragments.INVOICE_DETAILS
+    + fragments.INVOICE_ORDER_DETAILS
     + """
     subscription{
       event{
         ...on InvoiceDeleted{
           invoice{
             ...InvoiceDetails
+          }
+          order {
+            ...InvoiceOrderDetails
           }
         }
       }
@@ -974,12 +1489,16 @@ INVOICE_DELETED = (
 
 INVOICE_SENT = (
     fragments.INVOICE_DETAILS
+    + fragments.INVOICE_ORDER_DETAILS
     + """
     subscription{
       event{
         ...on InvoiceSent{
           invoice{
             ...InvoiceDetails
+          }
+          order {
+            ...InvoiceOrderDetails
           }
         }
       }
@@ -993,6 +1512,7 @@ FULFILLMENT_CREATED = (
     subscription{
       event{
         ...on FulfillmentCreated{
+          notifyCustomer
           fulfillment{
             ...FulfillmentDetails
           }
@@ -1023,12 +1543,14 @@ FULFILLMENT_CANCELED = (
 """
 )
 
+
 FULFILLMENT_APPROVED = (
     fragments.FULFILLMENT_DETAILS
     + """
     subscription{
       event{
         ...on FulfillmentApproved{
+          notifyCustomer
           fulfillment{
             ...FulfillmentDetails
           }
@@ -1048,6 +1570,24 @@ FULFILLMENT_METADATA_UPDATED = (
     subscription{
       event{
         ...on FulfillmentMetadataUpdated{
+          fulfillment{
+            ...FulfillmentDetails
+          }
+          order{
+            id
+          }
+        }
+      }
+    }
+"""
+)
+
+FULFILLMENT_TRACKING_NUMBER_UPDATED = (
+    fragments.FULFILLMENT_DETAILS
+    + """
+    subscription{
+      event{
+        ...on FulfillmentTrackingNumberUpdated{
           fulfillment{
             ...FulfillmentDetails
           }
@@ -1206,6 +1746,18 @@ CHECKOUT_UPDATED = """
     subscription{
       event{
         ...on CheckoutUpdated{
+          checkout{
+            id
+          }
+        }
+      }
+    }
+"""
+
+CHECKOUT_FULLY_PAID = """
+    subscription{
+      event{
+        ...on CheckoutFullyPaid{
           checkout{
             id
           }
@@ -1426,6 +1978,7 @@ subscription {
         }
         ... on SaleTranslation {
           id
+          __typename
         }
         ... on VoucherTranslation {
           id
@@ -1434,6 +1987,13 @@ subscription {
           id
         }
         ... on AttributeValueTranslation {
+          id
+        }
+        ... on PromotionTranslation {
+          id
+          __typename
+        }
+        ... on PromotionRuleTranslation {
           id
         }
       }
@@ -1470,6 +2030,7 @@ subscription {
         }
         ... on SaleTranslation {
           id
+          __typename
         }
         ... on VoucherTranslation {
           id
@@ -1478,6 +2039,13 @@ subscription {
           id
         }
         ... on AttributeValueTranslation {
+          id
+        }
+        ... on PromotionTranslation {
+          id
+          __typename
+        }
+        ... on PromotionRuleTranslation {
           id
         }
       }
@@ -2007,20 +2575,24 @@ INVALID_MULTIPLE_EVENTS_WITH_FRAGMENTS = (
       event{
         ...on ProductUpdated{
           product{
-          variants{
-            ...ProductVariant
-            }
-            ...CategoryDetails
+              variants{
+                ...ProductVariant
+                }
+              category {
+                ...CategoryDetails
+              }
           }
         }
       }
       event{
         ...on ProductCreated{
           product{
-          variants{
+            variants{
                 ...ProductVariant
             }
-            ...CategoryDetails
+            category{
+              ...CategoryDetails
+            }
           }
         }
       }
@@ -2037,13 +2609,49 @@ QUERY_WITH_MULTIPLE_FRAGMENTS = (
       event{
         ...on ProductUpdated{
           product{
-          variants{
-            ...ProductVariant
+            variants{
+              ...ProductVariant
             }
-            ...CategoryDetails
+            category{
+              ...CategoryDetails
+            }
           }
         }
       }
     }
     """
 )
+
+THUMBNAIL_CREATED = """
+    subscription {
+      event {
+        ... on ThumbnailCreated {
+          url
+          id
+          objectId
+          mediaUrl
+        }
+      }
+    }
+"""
+
+
+ORDER_CALCULATE_TAXES = """
+    subscription {
+      event {
+        ... on CalculateTaxes {
+          taxBase {
+            sourceObject {
+              ...on Order{
+                discounts {
+                  amount {
+                    amount
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+"""

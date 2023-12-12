@@ -42,7 +42,7 @@ def test_file_upload_by_staff(staff_api_client, site_settings, media_root):
     errors = data["errors"]
 
     assert not errors
-    assert data["uploadedFile"]["contentType"] == "image/png"
+    assert data["uploadedFile"]["contentType"] == "image/jpeg"
     file_name, format = os.path.splitext(image_file._name)
     returned_url = data["uploadedFile"]["url"]
     file_path = urlparse(returned_url).path
@@ -83,7 +83,7 @@ def test_file_upload_by_app(app_api_client, media_root):
     errors = data["errors"]
 
     assert not errors
-    assert data["uploadedFile"]["contentType"] == "image/png"
+    assert data["uploadedFile"]["contentType"] == "image/jpeg"
     file_name, format = os.path.splitext(image_file._name)
     returned_url = data["uploadedFile"]["url"]
     file_path = urlparse(returned_url).path
@@ -109,7 +109,7 @@ def test_file_upload_by_superuser(superuser_api_client, media_root):
     errors = data["errors"]
 
     assert not errors
-    assert data["uploadedFile"]["contentType"] == "image/png"
+    assert data["uploadedFile"]["contentType"] == "image/jpeg"
     file_name, format = os.path.splitext(image_file._name)
     returned_url = data["uploadedFile"]["url"]
     file_path = urlparse(returned_url).path
@@ -121,9 +121,6 @@ def test_file_upload_by_superuser(superuser_api_client, media_root):
 def test_file_upload_file_with_the_same_name_already_exists(
     staff_api_client, media_root, site_settings
 ):
-    """Ensure that when the file with the same name as uploaded file,
-    already exists, the file name will be renamed and save as another file.
-    """
     # given
     image_file1, image_name1 = create_image()
     path = default_storage.save(image_file1._name, image_file1)
@@ -148,7 +145,7 @@ def test_file_upload_file_with_the_same_name_already_exists(
 
     domain = site_settings.site.domain
     assert not errors
-    assert data["uploadedFile"]["contentType"] == "image/png"
+    assert data["uploadedFile"]["contentType"] == "image/jpeg"
     file_url = data["uploadedFile"]["url"]
     assert file_url != f"http://{domain}/media/{image_file._name}"
     assert file_url != f"http://{domain}/media/{path}"
@@ -172,7 +169,7 @@ def test_file_upload_file_name_with_space(staff_api_client, media_root):
     errors = data["errors"]
 
     assert not errors
-    assert data["uploadedFile"]["contentType"] == "image/png"
+    assert data["uploadedFile"]["contentType"] == "image/jpeg"
     file_name, format = os.path.splitext(image_file._name)
     file_name = file_name.replace(" ", "_")
     returned_url = data["uploadedFile"]["url"]
@@ -199,7 +196,7 @@ def test_file_upload_file_name_with_encoded_value(staff_api_client, media_root):
     errors = data["errors"]
 
     assert not errors
-    assert data["uploadedFile"]["contentType"] == "image/png"
+    assert data["uploadedFile"]["contentType"] == "image/jpeg"
     file_name, format = os.path.splitext(image_file._name)
     returned_url = data["uploadedFile"]["url"]
     file_path = urlparse(returned_url).path

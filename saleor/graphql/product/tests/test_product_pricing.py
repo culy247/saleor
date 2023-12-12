@@ -96,7 +96,7 @@ def _configure_tax_rates(product):
 
 
 @pytest.mark.parametrize(
-    "net_PL, gross_PL, net_DE, gross_DE, prices_entered_with_tax",
+    ("net_PL", "gross_PL", "net_DE", "gross_DE", "prices_entered_with_tax"),
     [
         (40.65, 50.00, 42.02, 50.00, True),
         (50.00, 61.50, 50.00, 59.50, False),
@@ -246,7 +246,7 @@ def test_product_pricing_no_flat_rates_in_one_country(
     _enable_flat_rates(channel_PLN, True)
     _configure_tax_rates(product)
     TaxConfigurationPerCountry.objects.filter(country="PL").update(
-        tax_calculation_strategy=None
+        tax_calculation_strategy="TAX_APP"
     )
 
     # when

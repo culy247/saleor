@@ -1,7 +1,7 @@
 import json
 import uuid
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Optional
 
 import graphene
 from django.core.serializers.json import DjangoJSONEncoder
@@ -17,7 +17,8 @@ from .exceptions import ApiCallTruncationError, EventDeliveryAttemptTruncationEr
 from .obfuscation import (
     anonymize_event_payload,
     anonymize_gql_operation_response,
-    hide_sensitive_headers,
+    filter_and_hide_headers,
+    obfuscate_url,
 )
 from .payload_schema import (
     ApiCallPayload,
@@ -82,15 +83,15 @@ GQL_OPERATION_PLACEHOLDER = GraphQLOperation(
 GQL_OPERATION_PLACEHOLDER_SIZE = len(dump_payload(GQL_OPERATION_PLACEHOLDER))
 
 
-def serialize_headers(headers: Optional[Dict[str, str]]) -> HttpHeaders:
+def serialize_headers(headers: Optional[dict[str, str]]) -> HttpHeaders:
     if headers:
-        return list(hide_sensitive_headers(headers).items())
+        return list(filter_and_hide_headers(headers).items())
     return []
 
 
 def serialize_gql_operation_result(
     operation: "GraphQLOperationResponse", bytes_limit: int
-) -> Tuple[GraphQLOperation, int]:
+) -> tuple[GraphQLOperation, int]:
     bytes_limit -= GQL_OPERATION_PLACEHOLDER_SIZE
     if bytes_limit < 0:
         raise ApiCallTruncationError("serialize_gql_operation_result", bytes_limit, 0)
@@ -124,8 +125,8 @@ def serialize_gql_operation_result(
 
 
 def serialize_gql_operation_results(
-    operations: List["GraphQLOperationResponse"], bytes_limit: int
-) -> List[GraphQLOperation]:
+    operations: list["GraphQLOperationResponse"], bytes_limit: int
+) -> list[GraphQLOperation]:
     payload_size = len(operations) * GQL_OPERATION_PLACEHOLDER_SIZE
     if bytes_limit - payload_size < 0:
         raise ApiCallTruncationError(
@@ -134,7 +135,7 @@ def serialize_gql_operation_results(
             payload_size,
             gql_operations_count=len(operations),
         )
-    payloads: List[GraphQLOperation] = []
+    payloads: list[GraphQLOperation] = []
     for i, operation in enumerate(operations):
         payload_limit = bytes_limit // (len(operations) - i)
         payload, left_bytes = serialize_gql_operation_result(operation, payload_limit)
@@ -147,7 +148,7 @@ def serialize_gql_operation_results(
 def generate_api_call_payload(
     request: HttpRequest,
     response: HttpResponse,
-    gql_operations: List["GraphQLOperationResponse"],
+    gql_operations: list["GraphQLOperationResponse"],
     bytes_limit: int,
 ) -> ApiCallPayload:
     payload = ApiCallPayload(
@@ -155,7 +156,7 @@ def generate_api_call_payload(
         request=ApiCallRequest(
             id=str(uuid.uuid4()),
             method=request.method or "",
-            url=build_absolute_uri(request.get_full_path()),  # type: ignore
+            url=build_absolute_uri(request.get_full_path()),
             time=getattr(request, "request_time", timezone.now()).timestamp(),
             headers=serialize_headers(dict(request.headers)),
             content_length=int(request.headers.get("Content-Length") or 0),
@@ -192,7 +193,7 @@ def generate_event_delivery_attempt_payload(
 ) -> EventDeliveryAttemptPayload:
     if not attempt.delivery:
         raise ValueError(
-            f"EventDeliveryAttempt {attempt.id} is not assigned to delivery."
+            f"EventDeliveryAttempt {attempt.id} is not assigned to delivery. "
             "Can't generate payload."
         )
     if not attempt.delivery.payload:
@@ -230,7 +231,7 @@ def generate_event_delivery_attempt_payload(
         webhook=Webhook(
             id=graphene.Node.to_global_id("Webhook", attempt.delivery.webhook.pk),
             name=attempt.delivery.webhook.name or "",
-            target_url=attempt.delivery.webhook.target_url,
+            target_url=obfuscate_url(attempt.delivery.webhook.target_url),
             subscription_query=TRUNC_PLACEHOLDER,
         ),
         app=App(

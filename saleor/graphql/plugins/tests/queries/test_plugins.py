@@ -49,7 +49,6 @@ PLUGINS_QUERY = """
 
 
 def test_query_plugin_configurations(staff_api_client_can_manage_plugins, settings):
-
     # Enable test plugin
     settings.PLUGINS = ["saleor.plugins.tests.sample_plugins.PluginSample"]
     response = staff_api_client_can_manage_plugins.post_graphql(PLUGINS_QUERY)
@@ -92,7 +91,6 @@ def test_query_plugin_configurations(staff_api_client_can_manage_plugins, settin
 def test_query_plugin_configurations_for_channel_configurations(
     staff_api_client_can_manage_plugins, settings, channel_PLN
 ):
-
     # Enable test plugin
     settings.PLUGINS = ["saleor.plugins.tests.sample_plugins.ChannelPluginSample"]
 
@@ -140,7 +138,14 @@ def test_query_plugin_configurations_for_channel_configurations(
 
 
 @pytest.mark.parametrize(
-    "password, expected_password, api_key, expected_api_key, cert, expected_cert",
+    (
+        "password",
+        "expected_password",
+        "api_key",
+        "expected_api_key",
+        "cert",
+        "expected_cert",
+    ),
     [
         (None, None, None, None, None, None),
         ("ABCDEFGHIJ", "", "123456789", "6789", "long text\n with new\n lines", "ines"),
@@ -159,7 +164,6 @@ def test_query_plugins_hides_secret_fields(
     permission_manage_plugins,
     settings,
 ):
-
     settings.PLUGINS = ["saleor.plugins.tests.sample_plugins.PluginSample"]
     manager = get_plugins_manager()
     plugin = manager.get_plugin(PluginSample.PLUGIN_ID)
@@ -197,7 +201,14 @@ def test_query_plugins_hides_secret_fields(
 
 
 @pytest.mark.parametrize(
-    "password, expected_password, api_key, expected_api_key, cert, expected_cert",
+    (
+        "password",
+        "expected_password",
+        "api_key",
+        "expected_api_key",
+        "cert",
+        "expected_cert",
+    ),
     [
         (None, None, None, None, None, None),
         ("ABCDEFGHIJ", "", "123456789", "6789", "long text\n with new\n lines", "ines"),
@@ -217,7 +228,6 @@ def test_query_plugins_hides_secret_fields_for_channel_configurations(
     settings,
     channel_PLN,
 ):
-
     settings.PLUGINS = ["saleor.plugins.tests.sample_plugins.ChannelPluginSample"]
     manager = get_plugins_manager()
     plugin = manager.get_plugin(
@@ -268,7 +278,7 @@ def test_query_plugin_configurations_as_customer_user(user_api_client, settings)
 
 
 @pytest.mark.parametrize(
-    "plugin_filter_fields, count",
+    ("plugin_filter_fields", "count"),
     [
         ({"search": "PluginSample"}, 1),
         ({"search": "description"}, 2),
@@ -337,7 +347,7 @@ QUERY_PLUGIN_WITH_SORT = """
 
 
 @pytest.mark.parametrize(
-    "plugin_sort, result_order",
+    ("plugin_sort", "result_order"),
     [
         (
             {"field": "NAME", "direction": "ASC"},
@@ -379,7 +389,6 @@ def test_query_plugins_with_sort(
 def test_cannot_retrieve_hidden_plugins(
     settings, staff_api_client_can_manage_plugins, channel_PLN
 ):
-    """Ensure one cannot see hidden plugins when listing"""
     settings.PLUGINS = [
         "saleor.plugins.tests.sample_plugins.ChannelPluginSample",
         "saleor.plugins.tests.sample_plugins.PluginSample",

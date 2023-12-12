@@ -8,6 +8,10 @@ from django.utils import timezone
 
 from .....attribute import AttributeInputType, AttributeType
 from .....attribute.models import Attribute, AttributeValue
+from .....attribute.tests.model_helpers import (
+    get_product_attribute_values,
+    get_product_attributes,
+)
 from .....attribute.utils import associate_attribute_values_to_instance
 from .....core.postgres import FlatConcatSearchVector
 from .....core.units import MeasurementUnits
@@ -49,7 +53,6 @@ def test_products_query_with_filter_attributes(
     permission_manage_products,
     channel_USD,
 ):
-
     product_type = ProductType.objects.create(
         name="Custom Type",
         slug="custom-type",
@@ -87,16 +90,17 @@ def test_products_query_with_filter_attributes(
 
 
 @pytest.mark.parametrize(
-    "gte, lte, expected_products_index",
+    ("gte", "lte", "expected_products_index"),
     [
-        (None, 8, [1]),
-        (0, 8, [1]),
+        (None, 8, [1, 2]),
+        (0, 8, [1, 2]),
         (7, 8, []),
-        (5, None, [0, 1]),
+        (5, None, [0, 1, 2]),
         (8, 10, [0]),
         (12, None, [0]),
         (20, None, []),
         (20, 8, []),
+        (5, 5, [1, 2]),
     ],
 )
 def test_products_query_with_filter_numeric_attributes(
@@ -131,15 +135,28 @@ def test_products_query_with_filter_numeric_attributes(
         category=category,
     )
     attr_value = AttributeValue.objects.create(
-        attribute=numeric_attribute, name="5.2", slug="5_2"
+        attribute=numeric_attribute, name="5", slug="5"
     )
 
     associate_attribute_values_to_instance(
         second_product, numeric_attribute, attr_value
     )
 
+    third_product = Product.objects.create(
+        name="Third product",
+        slug="third-product",
+        product_type=product_type,
+        category=category,
+    )
+    attr_value = AttributeValue.objects.create(
+        attribute=numeric_attribute, name="5", slug="5_X"
+    )
+
+    associate_attribute_values_to_instance(third_product, numeric_attribute, attr_value)
+
     second_product.refresh_from_db()
-    products_instances = [product, second_product]
+    third_product.refresh_from_db()
+    products_instances = [product, second_product, third_product]
     products_ids = [
         graphene.Node.to_global_id("Product", p.pk) for p in products_instances
     ]
@@ -171,7 +188,7 @@ def test_products_query_with_filter_numeric_attributes(
 
 
 @pytest.mark.parametrize(
-    "filter_value, expected_products_index",
+    ("filter_value", "expected_products_index"),
     [
         (False, [0, 1]),
         (True, [0]),
@@ -246,8 +263,8 @@ def test_products_query_with_filter_by_attributes_values_and_range(
     numeric_attribute,
     permission_manage_products,
 ):
-    product_attr = product.attributes.first()
-    attr_value_1 = product_attr.values.first()
+    product_attr = get_product_attributes(product).first()
+    attr_value_1 = get_product_attribute_values(product, product_attr).first()
     product.product_type.product_attributes.add(numeric_attribute)
     associate_attribute_values_to_instance(
         product, numeric_attribute, *numeric_attribute.values.all()
@@ -361,9 +378,6 @@ def test_products_query_with_filter_date_range_date_attributes(
     date_attribute,
     channel_USD,
 ):
-    """Ensure both products will be returned when filtering attributes by date range,
-    products with the same date attribute value."""
-
     # given
     product_type = product_list[0].product_type
     date_value = timezone.now()
@@ -425,9 +439,6 @@ def test_products_query_with_filter_date_range_date_variant_attributes(
     date_attribute,
     channel_USD,
 ):
-    """Ensure both products will be returned when filtering attributes by date range,
-    variants with the same date attribute value."""
-
     # given
     product_type = product_list[0].product_type
     date_value = timezone.now()
@@ -489,9 +500,6 @@ def test_products_query_with_filter_date_range_date_time_attributes(
     date_time_attribute,
     channel_USD,
 ):
-    """Ensure both products will be returned when filtering attributes by date time
-    range, products with the same date time attribute value."""
-
     # given
     product_type = product_list[0].product_type
     date_value = timezone.now()
@@ -556,9 +564,6 @@ def test_products_query_with_filter_date_range_date_time_variant_attributes(
     date_time_attribute,
     channel_USD,
 ):
-    """Ensure both products will be returned when filtering attributes by date time
-    range, variant and product with the same date time attribute value."""
-
     # given
     product_type = product_list[0].product_type
     date_value = timezone.now()
@@ -623,9 +628,6 @@ def test_products_query_with_filter_date_time_range_date_time_attributes(
     date_time_attribute,
     channel_USD,
 ):
-    """Ensure both products will be returned when filtering by attributes by date range
-    variants with the same date attribute value."""
-
     # given
     product_type = product_list[0].product_type
     date_value = datetime.now(tz=pytz.utc)
@@ -1461,7 +1463,6 @@ def test_products_query_with_filter_stock_availability_as_staff(
     permission_manage_products,
     channel_USD,
 ):
-
     for product in product_list:
         stock = product.variants.first().stocks.first()
         Allocation.objects.create(
@@ -1552,7 +1553,6 @@ def test_products_query_with_filter_stock_availability_as_user(
     permission_manage_products,
     channel_USD,
 ):
-
     for product in product_list:
         stock = product.variants.first().stocks.first()
         Allocation.objects.create(
@@ -1638,7 +1638,7 @@ def test_products_query_with_filter_stock_availability_only_stock_in_cc_warehous
 
 
 @pytest.mark.parametrize(
-    "quantity_input, warehouse_indexes, count, indexes_of_products_in_result",
+    ("quantity_input", "warehouse_indexes", "count", "indexes_of_products_in_result"),
     [
         ({"lte": "80", "gte": "20"}, [1, 2], 1, [1]),
         ({"lte": "120", "gte": "40"}, [1, 2], 1, [0]),

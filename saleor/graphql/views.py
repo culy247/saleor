@@ -1,9 +1,8 @@
-import fnmatch
 import hashlib
 import importlib
 import json
 from inspect import isclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Optional, Union
 
 import opentracing
 import opentracing.tags
@@ -18,9 +17,10 @@ from graphql import GraphQLDocument, get_default_backend
 from graphql.error import GraphQLError, GraphQLSyntaxError
 from graphql.execution import ExecutionResult
 from jwt.exceptions import PyJWTError
+from requests_hardened.ip_filter import InvalidIPAddress
 
 from .. import __version__ as saleor_version
-from ..core.exceptions import PermissionDenied, ReadOnlyException
+from ..core.exceptions import PermissionDenied
 from ..core.utils import is_valid_ipv4, is_valid_ipv6
 from ..webhook import observability
 from .api import API_PATH, schema
@@ -54,24 +54,33 @@ class GraphQLView(View):
     # https://github.com/prisma/graphql-playground)
     # - file upload (https://github.com/lmcgartland/graphene-file-upload)
     # - query batching
-    # - CORS
 
     schema = None
     executor = None
-    backend = None
     middleware = None
     root_value = None
 
-    HANDLED_EXCEPTIONS = (GraphQLError, PyJWTError, ReadOnlyException, PermissionDenied)
+    HANDLED_EXCEPTIONS = (
+        GraphQLError,
+        PyJWTError,
+        PermissionDenied,
+        InvalidIPAddress,
+    )
 
     def __init__(
-        self, schema=None, executor=None, middleware=None, root_value=None, backend=None
+        self,
+        schema=None,
+        executor=None,
+        middleware: Optional[list[str]] = None,
+        root_value=None,
+        backend=None,
     ):
         super().__init__()
         if backend is None:
             backend = get_default_backend()
         if middleware is None:
-            if middleware := settings.GRAPHENE.get("MIDDLEWARE"):
+            middleware = settings.GRAPHQL_MIDDLEWARE
+            if middleware:
                 middleware = [
                     self.import_middleware(middleware_name)
                     for middleware_name in middleware
@@ -100,27 +109,13 @@ class GraphQLView(View):
             if settings.PLAYGROUND_ENABLED:
                 return self.render_playground(request)
             return HttpResponseNotAllowed(["OPTIONS", "POST"])
-        if request.method == "OPTIONS":
-            response = self.options(request, *args, **kwargs)
         elif request.method == "POST":
-            response = self.handle_query(request)
+            return self.handle_query(request)
         else:
-            return HttpResponseNotAllowed(["GET", "OPTIONS", "POST"])
-        # Add access control headers
-        if "HTTP_ORIGIN" in request.META:
-            for origin in settings.ALLOWED_GRAPHQL_ORIGINS:
-                if fnmatch.fnmatchcase(request.META["HTTP_ORIGIN"], origin):
-                    response["Access-Control-Allow-Origin"] = request.META[
-                        "HTTP_ORIGIN"
-                    ]
-                    response["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-                    response["Access-Control-Allow-Headers"] = (
-                        "Origin, Content-Type, Accept, Authorization, "
-                        "Authorization-Bearer"
-                    )
-                    response["Access-Control-Allow-Credentials"] = "true"
-                    break
-        return response
+            if settings.PLAYGROUND_ENABLED:
+                return HttpResponseNotAllowed(["GET", "OPTIONS", "POST"])
+            else:
+                return HttpResponseNotAllowed(["OPTIONS", "POST"])
 
     def render_playground(self, request):
         return render(
@@ -204,7 +199,7 @@ class GraphQLView(View):
 
     def get_response(
         self, request: HttpRequest, data: dict
-    ) -> Tuple[Optional[Dict[str, List[Any]]], int]:
+    ) -> tuple[Optional[dict[str, list[Any]]], int]:
         with observability.report_gql_operation() as operation:
             execution_result = self.execute_graphql_request(request, data)
             status_code = 200
@@ -220,7 +215,7 @@ class GraphQLView(View):
                     response["data"] = execution_result.data
                 if execution_result.extensions:
                     response["extensions"] = execution_result.extensions
-                result: Optional[Dict[str, List[Any]]] = response
+                result: Optional[dict[str, list[Any]]] = response
             else:
                 result = None
             operation.result = result
@@ -231,8 +226,8 @@ class GraphQLView(View):
         return self.root_value
 
     def parse_query(
-        self, query: str
-    ) -> Tuple[Optional[GraphQLDocument], Optional[ExecutionResult]]:
+        self, query: Optional[str]
+    ) -> tuple[Optional[GraphQLDocument], Optional[ExecutionResult]]:
         """Attempt to parse a query (mandatory) to a gql document object.
 
         If no query was given or query is not a string, it returns an error.
@@ -250,7 +245,7 @@ class GraphQLView(View):
         # Attempt to parse the query, if it fails, return the error
         try:
             return (
-                self.backend.document_from_string(self.schema, query),  # type: ignore
+                self.backend.document_from_string(self.schema, query),
                 None,
             )
         except (ValueError, GraphQLSyntaxError) as e:
@@ -280,46 +275,50 @@ class GraphQLView(View):
             )
 
             query, variables, operation_name = self.get_graphql_params(request, data)
-            query_cost = 0
 
             document, error = self.parse_query(query)
             with observability.report_gql_operation() as operation:
                 operation.query = document
                 operation.name = operation_name
                 operation.variables = variables
-            if error:
+            if error or document is None:
                 return error
 
-            if document is not None:
-                raw_query_string = document.document_string
-                span.set_tag("graphql.query", raw_query_string)
-                span.set_tag("graphql.query_identifier", query_identifier(document))
-                span.set_tag("graphql.query_fingerprint", query_fingerprint(document))
-                try:
-                    query_contains_schema = self.check_if_query_contains_only_schema(
-                        document
-                    )
-                except GraphQLError as e:
-                    return ExecutionResult(errors=[e], invalid=True)
-
-                query_cost, cost_errors = validate_query_cost(
-                    schema,
-                    document,
-                    variables,
-                    COST_MAP,
-                    settings.GRAPHQL_QUERY_MAX_COMPLEXITY,
+            raw_query_string = document.document_string
+            span.set_tag("graphql.query", raw_query_string)
+            span.set_tag("graphql.query_identifier", query_identifier(document))
+            span.set_tag("graphql.query_fingerprint", query_fingerprint(document))
+            try:
+                query_contains_schema = self.check_if_query_contains_only_schema(
+                    document
                 )
-                span.set_tag("graphql.query_cost", query_cost)
-                if settings.GRAPHQL_QUERY_MAX_COMPLEXITY and cost_errors:
-                    result = ExecutionResult(errors=cost_errors, invalid=True)
-                    return set_query_cost_on_result(result, query_cost)
+            except GraphQLError as e:
+                return ExecutionResult(errors=[e], invalid=True)
 
-            extra_options: Dict[str, Optional[Any]] = {}
+            query_cost, cost_errors = validate_query_cost(
+                schema,
+                document,
+                variables,
+                COST_MAP,
+                settings.GRAPHQL_QUERY_MAX_COMPLEXITY,
+            )
+            span.set_tag("graphql.query_cost", query_cost)
+            if settings.GRAPHQL_QUERY_MAX_COMPLEXITY and cost_errors:
+                result = ExecutionResult(errors=cost_errors, invalid=True)
+                return set_query_cost_on_result(result, query_cost)
+
+            extra_options: dict[str, Optional[Any]] = {}
 
             if self.executor:
                 # We only include it optionally since
                 # executor is not a valid argument in all backends
                 extra_options["executor"] = self.executor
+
+            context = get_context_value(request)
+            if app := getattr(request, "app", None):
+                span.set_tag("app.id", app.id)
+                span.set_tag("app.name", app.name)
+
             try:
                 with connection.execute_wrapper(tracing_wrapper):
                     response = None
@@ -331,25 +330,21 @@ class GraphQLView(View):
                         response = cache.get(key)
 
                     if not response:
-                        response = document.execute(  # type: ignore
+                        response = document.execute(
                             root=self.get_root_value(),
                             variables=variables,
                             operation_name=operation_name,
-                            context=get_context_value(request),
+                            context=context,
                             middleware=self.middleware,
                             **extra_options,
                         )
                         if should_use_cache_for_scheme:
                             cache.set(key, response)
 
-                    if app := getattr(request, "app", None):
-                        span.set_tag("app.name", app.name)
-
                     return set_query_cost_on_result(response, query_cost)
             except Exception as e:
                 span.set_tag(opentracing.tags.ERROR, True)
-                if app := getattr(request, "app", None):
-                    span.set_tag("app.name", app.name)
+
                 # In the graphql-core version that we are using,
                 # the Exception is raised for too big integers value.
                 # As it's a validation error we want to raise GraphQLError instead.

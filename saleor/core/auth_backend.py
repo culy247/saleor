@@ -1,9 +1,13 @@
 import jwt
-from django.contrib.auth.backends import ModelBackend
 
 from ..account.models import User
 from ..graphql.account.dataloaders import UserByEmailLoader
 from ..graphql.plugins.dataloaders import AnonymousPluginManagerLoader
+from ..permission.enums import (
+    get_permissions_from_codenames,
+    get_permissions_from_names,
+)
+from ..plugins.manager import get_plugins_manager
 from .auth import get_token_from_request
 from .jwt import (
     JWT_ACCESS_TYPE,
@@ -12,10 +16,33 @@ from .jwt import (
     is_saleor_token,
     jwt_decode,
 )
-from .permissions import get_permissions_from_codenames, get_permissions_from_names
 
 
-class JSONWebTokenBackend(ModelBackend):
+# Moved from `django.contrib.auth.backends.ModelBackend`
+class BaseBackend:
+    def authenticate(self, request, **kwargs):
+        return None
+
+    def get_user(self, user_id):
+        return None
+
+    def get_user_permissions(self, user_obj, obj=None):
+        return set()
+
+    def get_group_permissions(self, user_obj, obj=None):
+        return set()
+
+    def get_all_permissions(self, user_obj, obj=None):
+        return {
+            *self.get_user_permissions(user_obj, obj=obj),
+            *self.get_group_permissions(user_obj, obj=obj),
+        }
+
+    def has_perm(self, user_obj, perm, obj=None):
+        return perm in self.get_all_permissions(user_obj, obj=obj)
+
+
+class JSONWebTokenBackend(BaseBackend):
     def authenticate(self, request=None, **kwargs):
         return load_user_from_request(request)
 
@@ -49,12 +76,44 @@ class JSONWebTokenBackend(ModelBackend):
             setattr(user_obj, perm_cache_name, {f"{ct}.{name}" for ct, name in perms})
         return getattr(user_obj, perm_cache_name)
 
+    # Moved from `django.contrib.auth.backends.ModelBackend`
+    def get_user_permissions(self, user_obj, obj=None):  # noqa: D205, D212, D400, D415
+        """Return a set of permissions the user `user_obj` holds directly."""
+        return self._get_permissions(user_obj, obj, "user")
+
+    # Moved from `django.contrib.auth.backends.ModelBackend`
+    def get_group_permissions(self, user_obj, obj=None):  # noqa: D205, D212, D400, D415
+        """Return a set of permissions the user `user_obj` gets from their groups."""
+        return self._get_permissions(user_obj, obj, "group")
+
+    # Moved from `django.contrib.auth.backends.ModelBackend`
+    def get_all_permissions(self, user_obj, obj=None):
+        if not user_obj.is_active or user_obj.is_anonymous or obj is not None:
+            return set()
+        if not hasattr(user_obj, "_perm_cache"):
+            user_obj._perm_cache = super().get_all_permissions(user_obj)
+        return user_obj._perm_cache
+
+    # Moved from `django.contrib.auth.backends.ModelBackend`
+    def has_perm(self, user_obj, perm, obj=None):
+        return user_obj.is_active and super().has_perm(user_obj, perm, obj=obj)
+
 
 class PluginBackend(JSONWebTokenBackend):
     def authenticate(self, request=None, **kwargs):
         if request is None:
             return None
-        manager = AnonymousPluginManagerLoader(request).load("Anonymous").get()
+        # We can't use `AnonymousPluginManagerLoader(request).load("Anonymous").get()`
+        # here because `get()` cause that many Promise are waiting in middle of caching
+        # authenticated user. Which cause as many authentication plugin calls
+        # as many Promise are waiting.
+
+        allow_replica = getattr(request, "allow_replica", True)
+        manager = get_plugins_manager(None, allow_replica)
+
+        # Store created manager in request to be used in other Dataloader.
+        plugin_loader = AnonymousPluginManagerLoader(request)
+        plugin_loader.prime("Anonymous", manager)
         return manager.authenticate_user(request)
 
 

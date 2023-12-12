@@ -1,20 +1,33 @@
 import hashlib
 import logging
 import traceback
-from typing import Union
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Any, Union
 from uuid import UUID
 
 import graphene
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db.models import Q, Value
 from django.db.models.functions import Concat
 from graphql import GraphQLDocument
 from graphql.error import GraphQLError
 from graphql.error import format_error as format_graphql_error
+from jwt import InvalidTokenError
 
+from ...account.models import User
+from ...app.models import App
+from ...core.exceptions import (
+    CircularSubscriptionSyncEvent,
+    PermissionDenied,
+)
 from ..core.enums import PermissionEnum
 from ..core.types import TYPES_WITH_DOUBLE_ID_AVAILABLE, Permission
 from ..core.utils import from_global_id_or_error
+from ..core.validators.query_cost import QueryCostError
+
+if TYPE_CHECKING:
+    from ..core import SaleorContext
 
 unhandled_errors_logger = logging.getLogger("saleor.graphql.errors.unhandled")
 handled_errors_logger = logging.getLogger("saleor.graphql.errors.handled")
@@ -28,9 +41,21 @@ REVERSED_DIRECTION = {
     "": "-",
 }
 
+# List of error types of which messages can be returned in the GraphQL API.
+ALLOWED_ERRORS = [
+    CircularSubscriptionSyncEvent,
+    GraphQLError,
+    InvalidTokenError,
+    PermissionDenied,
+    ValidationError,
+    QueryCostError,
+]
+
+INTERNAL_ERROR_MESSAGE = "Internal Server Error"
+
 
 def resolve_global_ids_to_primary_keys(
-    ids, graphene_type=None, raise_error: bool = False
+    ids: Iterable[str], graphene_type=None, raise_error: bool = False
 ):
     pks = []
     invalid_ids = []
@@ -66,12 +91,12 @@ def _resolve_graphene_type(schema, type_name):
     type_from_schema = schema.get_type(type_name)
     if type_from_schema:
         return type_from_schema.graphene_type
-    raise GraphQLError("Could not resolve the type {}".format(type_name))
+    raise GraphQLError(f"Could not resolve the type {type_name}")
 
 
 def get_nodes(
     ids,
-    graphene_type: Union[graphene.ObjectType, str] = None,
+    graphene_type: Union[graphene.ObjectType, str, None] = None,
     model=None,
     qs=None,
     schema=None,
@@ -150,24 +175,23 @@ def _get_node_for_types_with_double_id(qs, pks, graphene_type):
 def format_permissions_for_display(permissions):
     """Transform permissions queryset into Permission list.
 
-    Keyword Arguments:
-        permissions - queryset with permissions
-
+    Arguments:
+        permissions: queryset with permissions
     """
     permissions_data = permissions.annotate(
-        formated_codename=Concat("content_type__app_label", Value("."), "codename")
-    ).values("name", "formated_codename")
+        formatted_codename=Concat("content_type__app_label", Value("."), "codename")
+    ).values("name", "formatted_codename")
 
     formatted_permissions = [
         Permission(
-            code=PermissionEnum.get(data["formated_codename"]), name=data["name"]
+            code=PermissionEnum.get(data["formatted_codename"]), name=data["name"]
         )
         for data in permissions_data
     ]
     return formatted_permissions
 
 
-def get_user_or_app_from_context(context):
+def get_user_or_app_from_context(context: "SaleorContext") -> Union[App, User, None]:
     # order is important
     # app can be None but user if None then is passed as anonymous
     return context.app or context.user
@@ -244,6 +268,7 @@ def query_fingerprint(document: GraphQLDocument) -> str:
 
 
 def format_error(error, handled_exceptions):
+    result: dict[str, Any]
     if isinstance(error, GraphQLError):
         result = format_graphql_error(error)
     else:
@@ -261,6 +286,15 @@ def format_error(error, handled_exceptions):
         handled_errors_logger.info("A query had an error", exc_info=exc)
     else:
         unhandled_errors_logger.error("A query failed unexpectedly", exc_info=exc)
+
+    # If DEBUG mode is disabled we allow only certain error messages to be returned in
+    # the API. This prevents from leaking internals that might be included in Python
+    # exceptions' error messages.
+    is_allowed_err = type(exc) in ALLOWED_ERRORS or any(
+        [isinstance(exc, allowed_err) for allowed_err in ALLOWED_ERRORS]
+    )
+    if not is_allowed_err and not settings.DEBUG:
+        result["message"] = INTERNAL_ERROR_MESSAGE
 
     result["extensions"]["exception"] = {"code": type(exc).__name__}
     if settings.DEBUG:

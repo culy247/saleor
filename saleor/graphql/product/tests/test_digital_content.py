@@ -15,7 +15,6 @@ from ...tests.utils import (
 def test_fetch_all_digital_contents(
     staff_api_client, variant, digital_content, permission_manage_products
 ):
-
     digital_content_num = DigitalContent.objects.count()
     query = """
     query {
@@ -81,7 +80,8 @@ def test_digital_content_query_invalid_id(
     content = get_graphql_content_from_response(response)
     assert len(content["errors"]) == 1
     assert (
-        content["errors"][0]["message"] == f"Couldn't resolve id: {digital_content_id}."
+        content["errors"][0]["message"]
+        == f"Invalid ID: {digital_content_id}. Expected: DigitalContent."
     )
     assert content["data"]["digitalContent"] is None
 

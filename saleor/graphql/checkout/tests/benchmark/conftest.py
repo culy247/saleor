@@ -16,7 +16,7 @@ def customer_checkout(customer_user, checkout_with_voucher_percentage_and_shippi
     return checkout_with_voucher_percentage_and_shipping
 
 
-@pytest.fixture()
+@pytest.fixture
 def checkout_with_variants(
     checkout,
     stock,
@@ -24,7 +24,7 @@ def checkout_with_variants(
     product_with_single_variant,
     product_with_two_variants,
 ):
-    checkout_info = fetch_checkout_info(checkout, [], [], get_plugins_manager())
+    checkout_info = fetch_checkout_info(checkout, [], get_plugins_manager())
 
     add_variant_to_checkout(
         checkout_info, product_with_default_variant.variants.get(), 1
@@ -62,7 +62,7 @@ def checkout_with_variants_for_cc(checkout_for_cc, stocks_for_cc, product_varian
     return checkout_for_cc
 
 
-@pytest.fixture()
+@pytest.fixture
 def checkout_with_shipping_address(checkout_with_variants, address):
     checkout = checkout_with_variants
 
@@ -72,7 +72,7 @@ def checkout_with_shipping_address(checkout_with_variants, address):
     return checkout
 
 
-@pytest.fixture()
+@pytest.fixture
 def checkout_with_shipping_address_for_cc(checkout_with_variants_for_cc, address):
     checkout = checkout_with_variants_for_cc
 
@@ -82,7 +82,7 @@ def checkout_with_shipping_address_for_cc(checkout_with_variants_for_cc, address
     return checkout
 
 
-@pytest.fixture()
+@pytest.fixture
 def checkout_with_shipping_method(checkout_with_shipping_address, shipping_method):
     checkout = checkout_with_shipping_address
 
@@ -92,7 +92,7 @@ def checkout_with_shipping_method(checkout_with_shipping_address, shipping_metho
     return checkout
 
 
-@pytest.fixture()
+@pytest.fixture
 def checkout_with_delivery_method_for_cc(
     warehouses_for_cc, checkout_with_shipping_address_for_cc
 ):
@@ -104,7 +104,7 @@ def checkout_with_delivery_method_for_cc(
     return checkout
 
 
-@pytest.fixture()
+@pytest.fixture
 def checkout_with_billing_address(checkout_with_shipping_method, address):
     checkout = checkout_with_shipping_method
 
@@ -114,7 +114,7 @@ def checkout_with_billing_address(checkout_with_shipping_method, address):
     return checkout
 
 
-@pytest.fixture()
+@pytest.fixture
 def checkout_with_billing_address_for_cc(checkout_with_delivery_method_for_cc, address):
     checkout = checkout_with_delivery_method_for_cc
 
@@ -124,22 +124,24 @@ def checkout_with_billing_address_for_cc(checkout_with_delivery_method_for_cc, a
     return checkout
 
 
-@pytest.fixture()
+@pytest.fixture
 def checkout_with_voucher(checkout_with_billing_address, voucher):
     checkout = checkout_with_billing_address
     manager = get_plugins_manager()
     lines, _ = fetch_checkout_lines(checkout)
-    checkout_info = fetch_checkout_info(checkout, lines, [], manager)
-    add_voucher_to_checkout(manager, checkout_info, lines, voucher)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
+    add_voucher_to_checkout(
+        manager, checkout_info, lines, voucher, voucher.codes.first()
+    )
     return checkout
 
 
-@pytest.fixture()
+@pytest.fixture
 def checkout_with_charged_payment(checkout_with_voucher):
     checkout = checkout_with_voucher
     manager = get_plugins_manager()
     lines, _ = fetch_checkout_lines(checkout)
-    checkout_info = fetch_checkout_info(checkout_with_voucher, lines, [], manager)
+    checkout_info = fetch_checkout_info(checkout_with_voucher, lines, manager)
     manager = get_plugins_manager()
     taxed_total = calculations.checkout_total(
         manager=manager,
@@ -169,7 +171,7 @@ def checkout_with_charged_payment(checkout_with_voucher):
     return checkout
 
 
-@pytest.fixture()
+@pytest.fixture
 def checkout_with_digital_line_with_charged_payment(
     checkout_with_billing_address, digital_content, site_settings
 ):
@@ -179,7 +181,7 @@ def checkout_with_digital_line_with_charged_payment(
     site_settings.automatic_fulfillment_digital_products = True
     site_settings.save(update_fields=["automatic_fulfillment_digital_products"])
 
-    checkout_info = fetch_checkout_info(checkout, [], [], get_plugins_manager())
+    checkout_info = fetch_checkout_info(checkout, [], get_plugins_manager())
     add_variant_to_checkout(checkout_info, variant, 1)
     manager = get_plugins_manager()
     lines, _ = fetch_checkout_lines(checkout)
@@ -210,12 +212,12 @@ def checkout_with_digital_line_with_charged_payment(
     return checkout
 
 
-@pytest.fixture()
+@pytest.fixture
 def checkout_with_charged_payment_for_cc(checkout_with_billing_address_for_cc):
     checkout = checkout_with_billing_address_for_cc
     manager = get_plugins_manager()
     lines, _ = fetch_checkout_lines(checkout)
-    checkout_info = fetch_checkout_info(checkout, lines, [], manager)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
     manager = get_plugins_manager()
     taxed_total = calculations.checkout_total(
         manager=manager,
@@ -245,7 +247,7 @@ def checkout_with_charged_payment_for_cc(checkout_with_billing_address_for_cc):
     return checkout
 
 
-@pytest.fixture()
+@pytest.fixture
 def checkout_preorder_with_charged_payment(
     checkout_with_billing_address,
     preorder_variant_channel_threshold,
@@ -254,7 +256,7 @@ def checkout_preorder_with_charged_payment(
     checkout = checkout_with_billing_address
     manager = get_plugins_manager()
     lines, _ = fetch_checkout_lines(checkout)
-    checkout_info = fetch_checkout_info(checkout, lines, [], manager)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
     add_variant_to_checkout(checkout_info, preorder_variant_channel_threshold, 1)
     add_variant_to_checkout(checkout_info, preorder_variant_global_threshold, 1)
 

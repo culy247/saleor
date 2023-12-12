@@ -1,13 +1,16 @@
+from typing import cast
+
 import graphene
 from django.core.exceptions import ValidationError
 from django.db import transaction
 
 from ....account.models import User
 from ....core.exceptions import InsufficientStock
-from ....core.permissions import OrderPermissions
 from ....core.postgres import FlatConcatSearchVector
 from ....core.taxes import zero_taxed_money
 from ....core.tracing import traced_atomic_transaction
+from ....discount.models import VoucherCode
+from ....discount.utils import add_voucher_usage_by_customer
 from ....order import OrderStatus, models
 from ....order.actions import order_created
 from ....order.calculations import fetch_order_prices_if_expired
@@ -15,12 +18,15 @@ from ....order.error_codes import OrderErrorCode
 from ....order.fetch import OrderInfo, OrderLineInfo
 from ....order.search import prepare_order_search_vector_value
 from ....order.utils import get_order_country, update_order_display_gross_prices
+from ....permission.enums import OrderPermissions
 from ....warehouse.management import allocate_preorders, allocate_stocks
 from ....warehouse.reservations import is_reservation_enabled
-from ...app.dataloaders import load_app
+from ...app.dataloaders import get_app_promise
+from ...core import ResolveInfo
+from ...core.doc_category import DOC_CATEGORY_ORDERS
 from ...core.mutations import BaseMutation
 from ...core.types import OrderError
-from ...plugins.dataloaders import load_plugin_manager
+from ...plugins.dataloaders import get_plugin_manager_promise
 from ...site.dataloaders import get_site_promise
 from ..types import Order
 from ..utils import (
@@ -39,6 +45,7 @@ class DraftOrderComplete(BaseMutation):
 
     class Meta:
         description = "Completes creating an order."
+        doc_category = DOC_CATEGORY_ORDERS
         permissions = (OrderPermissions.MANAGE_ORDERS,)
         error_type_class = OrderError
         error_type_field = "order_errors"
@@ -63,16 +70,35 @@ class DraftOrderComplete(BaseMutation):
                     )
                 }
             )
+        return order
 
     @classmethod
-    def perform_mutation(cls, _root, info, id):
-        manager = load_plugin_manager(info.context)
+    def setup_voucher_customer(cls, order, channel):
+        if (
+            order.voucher
+            and order.voucher_code
+            and order.voucher.apply_once_per_customer
+            and channel.include_draft_order_in_voucher_usage
+        ):
+            code = VoucherCode.objects.filter(code=order.voucher_code).first()
+            if code:
+                add_voucher_usage_by_customer(code, order.get_customer_email())
+
+    @classmethod
+    def perform_mutation(  # type: ignore[override]
+        cls, _root, info: ResolveInfo, /, *, id: str
+    ):
+        user = info.context.user
+        user = cast(User, user)
+
+        manager = get_plugin_manager_promise(info.context).get()
         order = cls.get_node_or_error(
             info,
             id,
             only_type=Order,
             qs=models.Order.objects.prefetch_related("lines__variant"),
         )
+        cls.check_channel_permissions(info, [order.channel_id])
         order, _ = fetch_order_prices_if_expired(order, manager)
         cls.validate_order(order)
 
@@ -96,8 +122,12 @@ class DraftOrderComplete(BaseMutation):
             order.save()
 
             channel = order.channel
+            cls.setup_voucher_customer(order, channel)
             order_lines_info = []
             for line in order.lines.all():
+                if not line.variant:
+                    # we only care about stock for variants that still exist
+                    continue
                 if line.variant.track_inventory or line.variant.is_preorder_active():
                     line_data = OrderLineInfo(
                         line=line, quantity=line.quantity, variant=line.variant
@@ -133,11 +163,11 @@ class DraftOrderComplete(BaseMutation):
                 payment=order.get_last_payment(),
                 lines_data=order_lines_info,
             )
-            app = load_app(info.context)
+            app = get_app_promise(info.context).get()
             transaction.on_commit(
                 lambda: order_created(
                     order_info=order_info,
-                    user=info.context.user,
+                    user=user,
                     app=app,
                     manager=manager,
                     from_draft=True,

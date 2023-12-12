@@ -73,6 +73,7 @@ CREATE_PRODUCT_MUTATION = """
                                     }
                                 }
                             }
+                            externalReference
                           }
                           errors {
                             field
@@ -85,11 +86,15 @@ CREATE_PRODUCT_MUTATION = """
 """
 
 
+@patch(
+    "saleor.product.tasks.update_products_discounted_prices_for_promotion_task.delay"
+)
 @patch("saleor.plugins.manager.PluginsManager.product_updated")
 @patch("saleor.plugins.manager.PluginsManager.product_created")
 def test_create_product(
     created_webhook_mock,
     updated_webhook_mock,
+    update_products_discounted_prices_for_promotion_task_mock,
     staff_api_client,
     product_type,
     category,
@@ -111,6 +116,7 @@ def test_create_product(
     product_charge_taxes = True
     product_tax_rate = "STANDARD"
     tax_class_id = graphene.Node.to_global_id("TaxClass", tax_classes[0].pk)
+    external_reference = "test-ext-ref"
 
     # Mock tax interface with fake response from tax gateway
     monkeypatch.setattr(
@@ -147,6 +153,7 @@ def test_create_product(
             ],
             "metadata": [{"key": metadata_key, "value": metadata_value}],
             "privateMetadata": [{"key": metadata_key, "value": metadata_value}],
+            "externalReference": external_reference,
         }
     }
 
@@ -167,6 +174,7 @@ def test_create_product(
     assert data["product"]["productType"]["name"] == product_type.name
     assert data["product"]["category"]["name"] == category.name
     assert data["product"]["taxClass"]["id"] == tax_class_id
+    assert data["product"]["externalReference"] == external_reference
     values = (
         data["product"]["attributes"][0]["values"][0]["slug"],
         data["product"]["attributes"][1]["values"][0]["slug"],
@@ -175,11 +183,68 @@ def test_create_product(
     assert color_value_slug in values
 
     product = Product.objects.first()
+    assert product.search_index_dirty is True
     assert product.metadata == {metadata_key: metadata_value}
     assert product.private_metadata == {metadata_key: metadata_value}
 
     created_webhook_mock.assert_called_once_with(product)
     updated_webhook_mock.assert_not_called()
+    update_products_discounted_prices_for_promotion_task_mock.assert_called_once_with(
+        [product.id]
+    )
+
+
+def test_create_product_without_slug_and_not_allowed_characters_for_slug_in_name(
+    staff_api_client,
+    product_type,
+    permission_manage_products,
+):
+    # given
+    product_type_id = graphene.Node.to_global_id("ProductType", product_type.pk)
+    variables = {
+        "input": {
+            "productType": product_type_id,
+            "name": "->>",
+        }
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CREATE_PRODUCT_MUTATION, variables, permissions=[permission_manage_products]
+    )
+
+    # then
+    content = get_graphql_content(response)
+    data = content["data"]["productCreate"]
+    assert data["errors"] == []
+    assert data["product"]["slug"] == "-"
+
+
+def test_create_second_product_without_slug_and_not_allowed_characters_for_slug_in_name(
+    staff_api_client, product_type, permission_manage_products, product
+):
+    # given
+    product.slug = "-"
+    product.save(update_fields=["slug"])
+
+    product_type_id = graphene.Node.to_global_id("ProductType", product_type.pk)
+    variables = {
+        "input": {
+            "productType": product_type_id,
+            "name": "->>",
+        }
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CREATE_PRODUCT_MUTATION, variables, permissions=[permission_manage_products]
+    )
+
+    # then
+    content = get_graphql_content(response)
+    data = content["data"]["productCreate"]
+    assert data["errors"] == []
+    assert data["product"]["slug"] == "--2"
 
 
 def test_create_product_use_tax_class_from_product_type(
@@ -259,6 +324,181 @@ def test_create_product_description_plaintext(
 
     product = Product.objects.all().first()
     assert product.description_plaintext == description
+
+
+def test_create_product_with_using_attribute_external_ref(
+    staff_api_client,
+    product_type,
+    category,
+    color_attribute,
+    permission_manage_products,
+):
+    # given
+    product_type_id = graphene.Node.to_global_id("ProductType", product_type.pk)
+    category_id = graphene.Node.to_global_id("Category", category.pk)
+    product_name = "test name"
+    product_slug = "product-test-slug"
+
+    # test creating root product
+    variables = {
+        "input": {
+            "productType": product_type_id,
+            "category": category_id,
+            "name": product_name,
+            "slug": product_slug,
+            "attributes": [
+                {
+                    "externalReference": color_attribute.external_reference,
+                    "dropdown": {"value": "newColor"},
+                }
+            ],
+        }
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CREATE_PRODUCT_MUTATION, variables, permissions=[permission_manage_products]
+    )
+    content = get_graphql_content(response)
+    data = content["data"]["productCreate"]
+
+    # then
+    assert data["errors"] == []
+    assert data["product"]["name"] == product_name
+    assert data["product"]["slug"] == product_slug
+
+    expected_attributes_data = [
+        {
+            "attribute": {"slug": "color"},
+            "values": [
+                {
+                    "slug": "newcolor",
+                    "name": "newColor",
+                    "reference": None,
+                    "richText": None,
+                    "plainText": None,
+                    "file": None,
+                    "boolean": None,
+                    "date": None,
+                    "dateTime": None,
+                }
+            ],
+        }
+    ]
+
+    for attr_data in data["product"]["attributes"]:
+        assert attr_data in expected_attributes_data
+
+
+def test_create_product_with_using_attribute_id_and_external_ref(
+    staff_api_client,
+    product_type,
+    category,
+    color_attribute,
+    permission_manage_products,
+):
+    # given
+    product_type_id = graphene.Node.to_global_id("ProductType", product_type.pk)
+    category_id = graphene.Node.to_global_id("Category", category.pk)
+    product_name = "test name"
+    product_slug = "product-test-slug"
+
+    # test creating root product
+    variables = {
+        "input": {
+            "productType": product_type_id,
+            "category": category_id,
+            "name": product_name,
+            "slug": product_slug,
+            "attributes": [
+                {
+                    "id": graphene.Node.to_global_id("Attribute", color_attribute.pk),
+                    "externalReference": color_attribute.external_reference,
+                    "dropdown": {"value": "newColor"},
+                }
+            ],
+        }
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CREATE_PRODUCT_MUTATION, variables, permissions=[permission_manage_products]
+    )
+    content = get_graphql_content(response)
+    data = content["data"]["productCreate"]
+
+    # then
+    assert data["errors"]
+    assert data["errors"][0]["field"] == "attributes"
+    assert data["errors"][0]["code"] == ProductErrorCode.REQUIRED.name
+    assert data["errors"][0]["message"] == (
+        "Argument 'id' cannot be combined with 'externalReference'"
+    )
+
+
+def test_create_product_with_using_attribute_and_value_external_ref(
+    staff_api_client,
+    product_type,
+    category,
+    color_attribute,
+    permission_manage_products,
+):
+    # given
+    product_type_id = graphene.Node.to_global_id("ProductType", product_type.pk)
+    category_id = graphene.Node.to_global_id("Category", category.pk)
+    product_name = "test name"
+    product_slug = "product-test-slug"
+
+    attr_value = color_attribute.values.first()
+
+    # test creating root product
+    variables = {
+        "input": {
+            "productType": product_type_id,
+            "category": category_id,
+            "name": product_name,
+            "slug": product_slug,
+            "attributes": [
+                {
+                    "externalReference": color_attribute.external_reference,
+                    "dropdown": {"externalReference": attr_value.external_reference},
+                }
+            ],
+        }
+    }
+    # when
+    response = staff_api_client.post_graphql(
+        CREATE_PRODUCT_MUTATION, variables, permissions=[permission_manage_products]
+    )
+    content = get_graphql_content(response)
+    data = content["data"]["productCreate"]
+
+    # then
+    assert data["errors"] == []
+    assert data["product"]["name"] == product_name
+    assert data["product"]["slug"] == product_slug
+
+    expected_attributes_data = [
+        {
+            "attribute": {"slug": "color"},
+            "values": [
+                {
+                    "slug": attr_value.slug,
+                    "name": attr_value.name,
+                    "reference": None,
+                    "richText": None,
+                    "plainText": None,
+                    "file": None,
+                    "boolean": None,
+                    "date": None,
+                    "dateTime": None,
+                }
+            ],
+        }
+    ]
+
+    for attr_data in data["product"]["attributes"]:
+        assert attr_data in expected_attributes_data
 
 
 def test_create_product_with_rich_text_attribute(
@@ -344,8 +584,6 @@ def test_create_product_no_value_for_rich_text_attribute(
     rich_text_attribute,
     permission_manage_products,
 ):
-    """Ensure mutation not fail when as attributes input only rich text attribute id
-    is provided."""
     query = CREATE_PRODUCT_MUTATION
 
     product_type_id = graphene.Node.to_global_id("ProductType", product_type.pk)
@@ -470,8 +708,6 @@ def test_create_product_no_value_for_plain_text_attribute(
     permission_manage_products,
 ):
     # given
-    """Ensure mutation not fail when as attributes input only plain text attribute id
-    is provided."""
     query = CREATE_PRODUCT_MUTATION
 
     product_type_id = graphene.Node.to_global_id("ProductType", product_type.pk)
@@ -646,8 +882,6 @@ def test_create_product_no_value_for_date_attribute(
     date_attribute,
     permission_manage_products,
 ):
-    """Ensure mutation not fail when as attributes input only date attribute id
-    is provided."""
     query = CREATE_PRODUCT_MUTATION
 
     product_type_id = graphene.Node.to_global_id("ProductType", product_type.pk)
@@ -751,8 +985,6 @@ def test_create_product_no_value_for_boolean_attribute(
     boolean_attribute,
     permission_manage_products,
 ):
-    """Ensure mutation not fail when as attributes input only boolean attribute id
-    is provided."""
     query = CREATE_PRODUCT_MUTATION
 
     product_type_id = graphene.Node.to_global_id("ProductType", product_type.pk)
@@ -857,7 +1089,11 @@ def test_create_product_no_category_id(
     assert data["product"]["category"] is None
 
 
+@patch(
+    "saleor.product.tasks.update_products_discounted_prices_for_promotion_task.delay"
+)
 def test_create_product_with_negative_weight(
+    update_products_discounted_prices_for_promotion_task_mock,
     staff_api_client,
     product_type,
     category,
@@ -886,6 +1122,7 @@ def test_create_product_with_negative_weight(
     error = data["errors"][0]
     assert error["field"] == "weight"
     assert error["code"] == ProductErrorCode.INVALID.name
+    update_products_discounted_prices_for_promotion_task_mock.assert_not_called()
 
 
 def test_create_product_with_unicode_in_slug_and_name(
@@ -1984,7 +2221,7 @@ def test_create_product_no_values_given(
 
 
 @pytest.mark.parametrize(
-    "value, expected_name, expected_slug",
+    ("value", "expected_name", "expected_slug"),
     [(20.1, "20.1", "20_1"), (20, "20", "20"), ("1", "1", "1")],
 )
 def test_create_product_with_numeric_attribute_new_attribute_value(
@@ -2129,7 +2366,7 @@ def test_create_product_with_swatch_attribute_new_attribute_value(
             "category": category_id,
             "name": product_name,
             "slug": product_slug,
-            "attributes": [{"id": attr_id, "values": [new_value]}],
+            "attributes": [{"id": attr_id, "swatch": {"value": new_value}}],
         }
     }
 
@@ -2156,7 +2393,120 @@ def test_create_product_with_swatch_attribute_new_attribute_value(
     assert swatch_attribute.values.count() == values_count + 1
 
 
+def test_create_product_with_swatch_attribute_new_value_using_values_field(
+    staff_api_client,
+    product_type,
+    category,
+    swatch_attribute,
+    permission_manage_products,
+):
+    query = CREATE_PRODUCT_MUTATION
+
+    product_type_id = graphene.Node.to_global_id("ProductType", product_type.pk)
+    category_id = graphene.Node.to_global_id("Category", category.pk)
+    product_name = "test name"
+    product_slug = "product-test-slug"
+
+    values_count = swatch_attribute.values.count()
+
+    # Add second attribute
+    product_type.product_attributes.set([swatch_attribute])
+    attr_id = graphene.Node.to_global_id("Attribute", swatch_attribute.id)
+    values_count = swatch_attribute.values.count()
+    new_value = "Yellow"
+
+    # test creating root product
+    variables = {
+        "input": {
+            "productType": product_type_id,
+            "category": category_id,
+            "name": product_name,
+            "slug": product_slug,
+            "attributes": [{"id": attr_id, "values": [new_value]}],
+        }
+    }
+
+    response = staff_api_client.post_graphql(
+        query, variables, permissions=[permission_manage_products]
+    )
+    content = get_graphql_content(response)
+    data = content["data"]["productCreate"]
+    assert data["errors"] == []
+    assert data["product"]["name"] == product_name
+    assert data["product"]["slug"] == product_slug
+    assert data["product"]["productType"]["name"] == product_type.name
+    assert data["product"]["category"]["name"] == category.name
+    assert len(data["product"]["attributes"]) == 1
+    assert (
+        data["product"]["attributes"][0]["attribute"]["slug"] == swatch_attribute.slug
+    )
+    values = data["product"]["attributes"][0]["values"]
+    assert len(values) == 1
+    assert len(values) == 1
+    assert values[0]["name"] == new_value
+    assert values[0]["slug"] == slugify(new_value)
+
+    swatch_attribute.refresh_from_db()
+    assert swatch_attribute.values.count() == values_count + 1
+
+
 def test_create_product_with_swatch_attribute_existing_value(
+    staff_api_client,
+    product_type,
+    category,
+    swatch_attribute,
+    permission_manage_products,
+):
+    query = CREATE_PRODUCT_MUTATION
+
+    product_type_id = graphene.Node.to_global_id("ProductType", product_type.pk)
+    category_id = graphene.Node.to_global_id("Category", category.pk)
+    product_name = "test name"
+    product_slug = "product-test-slug"
+
+    values_count = swatch_attribute.values.count()
+
+    # Add second attribute
+    product_type.product_attributes.set([swatch_attribute])
+    attr_id = graphene.Node.to_global_id("Attribute", swatch_attribute.id)
+    existing_value = swatch_attribute.values.first()
+    existing_value_id = graphene.Node.to_global_id("AttributeValue", existing_value.id)
+
+    # test creating root product
+    variables = {
+        "input": {
+            "productType": product_type_id,
+            "category": category_id,
+            "name": product_name,
+            "slug": product_slug,
+            "attributes": [{"id": attr_id, "swatch": {"id": existing_value_id}}],
+        }
+    }
+
+    response = staff_api_client.post_graphql(
+        query, variables, permissions=[permission_manage_products]
+    )
+    content = get_graphql_content(response)
+    data = content["data"]["productCreate"]
+    assert data["errors"] == []
+    assert data["product"]["name"] == product_name
+    assert data["product"]["slug"] == product_slug
+    assert data["product"]["productType"]["name"] == product_type.name
+    assert data["product"]["category"]["name"] == category.name
+    assert len(data["product"]["attributes"]) == 1
+    assert (
+        data["product"]["attributes"][0]["attribute"]["slug"] == swatch_attribute.slug
+    )
+    values = data["product"]["attributes"][0]["values"]
+    assert len(values) == 1
+    assert values[0]["name"] == existing_value.name
+    assert values[0]["slug"] == existing_value.slug
+
+    swatch_attribute.refresh_from_db()
+    assert swatch_attribute.values.count() == values_count
+
+
+def test_create_product_with_swatch_attribute_existing_value_using_values_field(
     staff_api_client,
     product_type,
     category,
@@ -2291,8 +2641,8 @@ mutation createProduct(
 
 
 @pytest.mark.parametrize(
-    "weight, expected_weight_value",
-    (
+    ("weight", "expected_weight_value"),
+    [
         ("0", 0),
         (0, 0),
         (11.11, 11.11),
@@ -2301,7 +2651,7 @@ mutation createProduct(
         ({"value": 11.11, "unit": "kg"}, 11.11),
         ({"value": 11, "unit": "g"}, 0.011),
         ({"value": "1", "unit": "ounce"}, 0.028),
-    ),
+    ],
 )
 def test_create_product_with_weight_variable(
     weight,
@@ -2334,8 +2684,8 @@ def test_create_product_with_weight_variable(
 
 
 @pytest.mark.parametrize(
-    "weight, expected_weight_value",
-    (
+    ("weight", "expected_weight_value"),
+    [
         ("0", 0),
         (0, 0),
         ("11.11", 11.11),
@@ -2344,7 +2694,7 @@ def test_create_product_with_weight_variable(
         ('{value: 11.11, unit: "kg"}', 11.11),
         ('{value: 11, unit: "g"}', 0.011),
         ('{value: "1", unit: "ounce"}', 0.028),
-    ),
+    ],
 )
 def test_create_product_with_weight_input(
     weight,
@@ -2404,3 +2754,41 @@ def test_create_product_with_weight_input(
     result_weight = content["data"]["productCreate"]["product"]["weight"]
     assert result_weight["value"] == expected_weight_value
     assert result_weight["unit"] == site_settings.default_weight_unit.upper()
+
+
+def test_create_product_with_non_unique_external_reference(
+    staff_api_client,
+    product_type,
+    category,
+    product,
+    permission_manage_products,
+):
+    # given
+    query = CREATE_PRODUCT_MUTATION
+    product_type_id = graphene.Node.to_global_id("ProductType", product_type.pk)
+    category_id = graphene.Node.to_global_id("Category", category.pk)
+    ext_ref = "test-ext-ref"
+    product.external_reference = ext_ref
+    product.save(update_fields=["external_reference"])
+
+    variables = {
+        "input": {
+            "productType": product_type_id,
+            "category": category_id,
+            "externalReference": ext_ref,
+            "name": "test prod",
+            "slug": "test-prod",
+        }
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        query, variables, permissions=[permission_manage_products]
+    )
+    content = get_graphql_content(response)
+
+    # then
+    error = content["data"]["productCreate"]["errors"][0]
+    assert error["field"] == "externalReference"
+    assert error["code"] == ProductErrorCode.UNIQUE.name
+    assert error["message"] == "Product with this External reference already exists."

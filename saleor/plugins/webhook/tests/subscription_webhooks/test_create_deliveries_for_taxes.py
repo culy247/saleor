@@ -14,7 +14,9 @@ from .....order.models import Order
 from .....tests.fixtures import recalculate_order
 from .....webhook.event_types import WebhookEventSyncType
 from .....webhook.models import Webhook
-from ...tasks import create_delivery_for_subscription_sync_event
+from .....webhook.transport.synchronous.transport import (
+    create_delivery_for_subscription_sync_event,
+)
 
 TAXES_SUBSCRIPTION_QUERY = """
 subscription {
@@ -197,7 +199,6 @@ def test_checkout_calculate_taxes_with_voucher(
     webhook_app,
     permission_handle_taxes,
 ):
-
     # given
     webhook_app.permissions.add(permission_handle_taxes)
     event_type = WebhookEventSyncType.CHECKOUT_CALCULATE_TAXES
@@ -255,7 +256,6 @@ def test_checkout_calculate_taxes_with_shipping_voucher(
     webhook_app,
     permission_handle_taxes,
 ):
-
     # given
     voucher.type = VoucherType.SHIPPING
     webhook_app.permissions.add(permission_handle_taxes)
@@ -354,7 +354,6 @@ def test_checkout_calculate_taxes_empty_checkout(
 def test_order_calculate_taxes(
     order_line, webhook_app, permission_handle_taxes, shipping_zone, charge_taxes
 ):
-
     # given
     order = order_line.order
     expected_shipping_price = Money("2.00", order.currency)
@@ -425,7 +424,6 @@ def test_order_calculate_taxes_with_discounts(
     webhook_app,
     permission_handle_taxes,
 ):
-
     # given
     order = order_line.order
     order.total = order_line.total_price + order.shipping_price
@@ -440,7 +438,7 @@ def test_order_calculate_taxes_with_discounts(
         value_type=DiscountValueType.FIXED,
         value=value,
         reason="Discount reason",
-        amount=(order.undiscounted_total - order.total).gross,  # type: ignore
+        amount=(order.undiscounted_total - order.total).gross,
     )
     recalculate_order(order)
     order.refresh_from_db()
@@ -493,7 +491,6 @@ def test_order_calculate_taxes_with_discounts(
 def test_order_calculate_taxes_empty_order(
     order, webhook_app, permission_handle_taxes, channel_USD
 ):
-
     # given
     order = Order.objects.create(channel=channel_USD, currency="USD")
     webhook_app.permissions.add(permission_handle_taxes)

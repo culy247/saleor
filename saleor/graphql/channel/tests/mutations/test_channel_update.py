@@ -1,5 +1,6 @@
 import json
-from unittest.mock import patch
+from datetime import timedelta
+from unittest.mock import call, patch
 
 import graphene
 import pytest
@@ -12,7 +13,11 @@ from .....core.utils.json_serializer import CustomJsonEncoder
 from .....webhook.event_types import WebhookEventAsyncType
 from .....webhook.payloads import generate_meta, generate_requestor
 from ....tests.utils import assert_no_permission, get_graphql_content
-from ...enums import AllocationStrategyEnum
+from ...enums import (
+    AllocationStrategyEnum,
+    MarkAsPaidStrategyEnum,
+    TransactionFlowStrategyEnum,
+)
 
 CHANNEL_UPDATE_MUTATION = """
     mutation UpdateChannel($id: ID!,$input: ChannelUpdateInput!){
@@ -32,6 +37,15 @@ CHANNEL_UPDATE_MUTATION = """
                 stockSettings {
                     allocationStrategy
                 }
+                orderSettings {
+                    automaticallyConfirmAllNewOrders
+                    automaticallyFulfillNonShippableGiftCard
+                    expireOrdersAfter
+                    markAsPaidStrategy
+                    deleteExpiredOrdersAfter
+                    allowUnpaidOrders
+                    includeDraftOrderInVoucherUsage
+                }
             }
             errors{
                 field
@@ -46,7 +60,9 @@ CHANNEL_UPDATE_MUTATION = """
 
 
 def test_channel_update_mutation_as_staff_user(
-    permission_manage_channels, staff_api_client, channel_USD
+    permission_manage_channels,
+    staff_api_client,
+    channel_USD,
 ):
     # given
     channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
@@ -61,6 +77,13 @@ def test_channel_update_mutation_as_staff_user(
             "slug": slug,
             "defaultCountry": default_country,
             "stockSettings": {"allocationStrategy": allocation_strategy},
+            "orderSettings": {
+                "automaticallyConfirmAllNewOrders": False,
+                "automaticallyFulfillNonShippableGiftCard": False,
+                "expireOrdersAfter": 10,
+                "allowUnpaidOrders": True,
+                "includeDraftOrderInVoucherUsage": True,
+            },
         },
     }
 
@@ -86,6 +109,14 @@ def test_channel_update_mutation_as_staff_user(
         == default_country
     )
     assert channel_data["stockSettings"]["allocationStrategy"] == allocation_strategy
+    assert channel_data["orderSettings"]["automaticallyConfirmAllNewOrders"] is False
+    assert (
+        channel_data["orderSettings"]["automaticallyFulfillNonShippableGiftCard"]
+        is False
+    )
+    assert channel_data["orderSettings"]["expireOrdersAfter"] == 10
+    assert channel_data["orderSettings"]["includeDraftOrderInVoucherUsage"] is True
+    assert channel_data["orderSettings"]["allowUnpaidOrders"] is True
 
 
 def test_channel_update_mutation_as_app(
@@ -468,7 +499,12 @@ def test_channel_update_mutation_trigger_webhook(
     default_country = "FR"
     variables = {
         "id": channel_id,
-        "input": {"name": name, "slug": slug, "defaultCountry": default_country},
+        "input": {
+            "name": name,
+            "slug": slug,
+            "defaultCountry": default_country,
+            "metadata": [{"key": "key", "value": "value"}],
+        },
     }
 
     # when
@@ -483,8 +519,7 @@ def test_channel_update_mutation_trigger_webhook(
     data = content["data"]["channelUpdate"]
     assert not data["errors"]
     assert data["channel"]
-
-    mocked_webhook_trigger.assert_called_once_with(
+    update_webhook_args = [
         json.dumps(
             {
                 "id": channel_id,
@@ -501,6 +536,11 @@ def test_channel_update_mutation_trigger_webhook(
         [any_webhook],
         channel_USD,
         SimpleLazyObject(lambda: staff_api_client.user),
+    ]
+    metadata_webhook_args = update_webhook_args.copy()
+    metadata_webhook_args[1] = WebhookEventAsyncType.CHANNEL_METADATA_UPDATED
+    mocked_webhook_trigger.assert_has_calls(
+        [call(*update_webhook_args), call(*metadata_webhook_args)]
     )
 
 
@@ -701,3 +741,752 @@ def test_channel_update_mutation_duplicated_warehouses(
     assert errors[0]["field"] == "warehouses"
     assert errors[0]["code"] == ChannelErrorCode.DUPLICATED_INPUT_ITEM.name
     assert errors[0]["warehouses"] == [add_warehouse]
+
+
+@pytest.mark.parametrize("expire_input", [0, None])
+def test_channel_update_mutation_disable_expire_orders(
+    expire_input,
+    permission_manage_channels,
+    app_api_client,
+    channel_USD,
+):
+    # given
+    channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
+    channel_USD.expire_orders_after = 10
+    channel_USD.save()
+
+    variables = {
+        "id": channel_id,
+        "input": {
+            "orderSettings": {"expireOrdersAfter": expire_input},
+        },
+    }
+
+    # when
+    response = app_api_client.post_graphql(
+        CHANNEL_UPDATE_MUTATION,
+        variables=variables,
+        permissions=(permission_manage_channels,),
+    )
+
+    # then
+    content = get_graphql_content(response)
+    data = content["data"]["channelUpdate"]
+    assert not data["errors"]
+    assert data["channel"]["orderSettings"]["expireOrdersAfter"] is None
+
+    channel_USD.refresh_from_db()
+    assert channel_USD.expire_orders_after is None
+
+
+def test_channel_update_mutation_negative_expire_orders(
+    permission_manage_channels,
+    app_api_client,
+    channel_USD,
+):
+    # given
+    channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
+
+    variables = {
+        "id": channel_id,
+        "input": {
+            "orderSettings": {"expireOrdersAfter": -1},
+        },
+    }
+
+    # when
+    response = app_api_client.post_graphql(
+        CHANNEL_UPDATE_MUTATION,
+        variables=variables,
+        permissions=(permission_manage_channels,),
+    )
+
+    # then
+    content = get_graphql_content(response)
+    error = content["data"]["channelUpdate"]["errors"][0]
+    assert error["field"] == "expireOrdersAfter"
+    assert error["code"] == ChannelErrorCode.INVALID.name
+
+
+def test_channel_update_order_settings_manage_orders(
+    permission_manage_orders,
+    staff_api_client,
+    channel_USD,
+):
+    # given
+    channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
+    channel_USD.allow_unpaid_orders = True
+    channel_USD.save()
+    variables = {
+        "id": channel_id,
+        "input": {
+            "orderSettings": {
+                "automaticallyConfirmAllNewOrders": False,
+                "automaticallyFulfillNonShippableGiftCard": False,
+                "allowUnpaidOrders": False,
+            },
+        },
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CHANNEL_UPDATE_MUTATION,
+        variables=variables,
+        permissions=(permission_manage_orders,),
+    )
+    content = get_graphql_content(response)
+
+    # then
+    data = content["data"]["channelUpdate"]
+    assert not data["errors"]
+    channel_data = data["channel"]
+    assert channel_data["orderSettings"]["automaticallyConfirmAllNewOrders"] is False
+    assert (
+        channel_data["orderSettings"]["automaticallyFulfillNonShippableGiftCard"]
+        is False
+    )
+    assert channel_data["orderSettings"]["allowUnpaidOrders"] is False
+
+
+def test_channel_update_order_settings_empty_order_settings(
+    permission_manage_orders,
+    staff_api_client,
+    channel_USD,
+):
+    # given
+    channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
+    channel_USD.expire_orders_after = 10
+    channel_USD.save()
+
+    variables = {
+        "id": channel_id,
+        "input": {
+            "orderSettings": {},
+        },
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CHANNEL_UPDATE_MUTATION,
+        variables=variables,
+        permissions=(permission_manage_orders,),
+    )
+    content = get_graphql_content(response)
+
+    # then
+    data = content["data"]["channelUpdate"]
+    assert not data["errors"]
+    channel_data = data["channel"]
+    assert channel_data["orderSettings"]["automaticallyConfirmAllNewOrders"] is True
+    assert (
+        channel_data["orderSettings"]["automaticallyFulfillNonShippableGiftCard"]
+        is True
+    )
+    assert channel_data["orderSettings"]["expireOrdersAfter"] == 10
+
+    channel_USD.refresh_from_db()
+    assert channel_USD.automatically_confirm_all_new_orders is True
+    assert channel_USD.automatically_fulfill_non_shippable_gift_card is True
+    assert channel_USD.expire_orders_after == 10
+
+
+def test_channel_update_order_settings_manage_orders_as_app(
+    permission_manage_orders,
+    app_api_client,
+    channel_USD,
+):
+    # given
+    channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
+    variables = {
+        "id": channel_id,
+        "input": {
+            "orderSettings": {
+                "automaticallyConfirmAllNewOrders": False,
+                "automaticallyFulfillNonShippableGiftCard": False,
+            },
+        },
+    }
+
+    # when
+    response = app_api_client.post_graphql(
+        CHANNEL_UPDATE_MUTATION,
+        variables=variables,
+        permissions=(permission_manage_orders,),
+    )
+    content = get_graphql_content(response)
+
+    # then
+    data = content["data"]["channelUpdate"]
+    assert not data["errors"]
+    channel_data = data["channel"]
+    assert channel_data["orderSettings"]["automaticallyConfirmAllNewOrders"] is False
+    assert (
+        channel_data["orderSettings"]["automaticallyFulfillNonShippableGiftCard"]
+        is False
+    )
+
+
+def test_channel_update_order_settings_manage_orders_permission_denied(
+    permission_manage_orders,
+    staff_api_client,
+    channel_USD,
+):
+    # given
+    channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
+    variables = {
+        "id": channel_id,
+        "input": {
+            "name": "newNAme",
+            "orderSettings": {
+                "automaticallyConfirmAllNewOrders": False,
+                "automaticallyFulfillNonShippableGiftCard": False,
+            },
+        },
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CHANNEL_UPDATE_MUTATION,
+        variables=variables,
+        permissions=(permission_manage_orders,),
+    )
+
+    # then
+    assert_no_permission(response)
+
+
+def test_channel_update_order_settings_manage_orders_as_app_permission_denied(
+    permission_manage_orders,
+    app_api_client,
+    channel_USD,
+):
+    # given
+    channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
+    variables = {
+        "id": channel_id,
+        "input": {
+            "name": "newNAme",
+            "orderSettings": {
+                "automaticallyConfirmAllNewOrders": False,
+                "automaticallyFulfillNonShippableGiftCard": False,
+            },
+        },
+    }
+
+    # when
+    response = app_api_client.post_graphql(
+        CHANNEL_UPDATE_MUTATION,
+        variables=variables,
+        permissions=(permission_manage_orders,),
+    )
+
+    # then
+    assert_no_permission(response)
+
+
+def test_channel_update_order_mark_as_paid_strategy(
+    permission_manage_orders,
+    staff_api_client,
+    channel_USD,
+):
+    # given
+    channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
+    variables = {
+        "id": channel_id,
+        "input": {
+            "orderSettings": {
+                "automaticallyConfirmAllNewOrders": False,
+                "automaticallyFulfillNonShippableGiftCard": False,
+                "markAsPaidStrategy": MarkAsPaidStrategyEnum.TRANSACTION_FLOW.name,
+            },
+        },
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CHANNEL_UPDATE_MUTATION,
+        variables=variables,
+        permissions=(permission_manage_orders,),
+    )
+    content = get_graphql_content(response)
+
+    # then
+    data = content["data"]["channelUpdate"]
+    assert not data["errors"]
+    channel_data = data["channel"]
+    assert (
+        channel_data["orderSettings"]["markAsPaidStrategy"]
+        == MarkAsPaidStrategyEnum.TRANSACTION_FLOW.name
+    )
+    channel_USD.refresh_from_db()
+    assert (
+        channel_USD.order_mark_as_paid_strategy
+        == MarkAsPaidStrategyEnum.TRANSACTION_FLOW.value
+    )
+
+
+def test_channel_update_delete_expired_orders_after(
+    permission_manage_orders,
+    staff_api_client,
+    channel_USD,
+):
+    # given
+    channel_USD.delete_expired_orders_after = timedelta(days=1)
+    channel_USD.save()
+
+    delete_expired_after = 10
+    channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
+    variables = {
+        "id": channel_id,
+        "input": {
+            "orderSettings": {
+                "deleteExpiredOrdersAfter": delete_expired_after,
+            },
+        },
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CHANNEL_UPDATE_MUTATION,
+        variables=variables,
+        permissions=(permission_manage_orders,),
+    )
+    content = get_graphql_content(response)
+
+    # then
+    data = content["data"]["channelUpdate"]
+    assert not data["errors"]
+    channel_data = data["channel"]
+    channel_USD.refresh_from_db()
+    assert (
+        channel_data["orderSettings"]["deleteExpiredOrdersAfter"]
+        == delete_expired_after
+    )
+    assert channel_USD.delete_expired_orders_after == timedelta(
+        days=delete_expired_after
+    )
+
+
+@pytest.mark.parametrize("delete_expired_after", [-1, 0, 121, 300])
+def test_channel_update_set_incorrect_delete_expired_orders_after(
+    delete_expired_after,
+    permission_manage_orders,
+    staff_api_client,
+    channel_USD,
+):
+    # given
+    channel_USD.delete_expired_orders_after = timedelta(days=1)
+    channel_USD.save()
+
+    channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
+    variables = {
+        "id": channel_id,
+        "input": {
+            "orderSettings": {
+                "deleteExpiredOrdersAfter": delete_expired_after,
+            },
+        },
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CHANNEL_UPDATE_MUTATION,
+        variables=variables,
+        permissions=(permission_manage_orders,),
+    )
+    content = get_graphql_content(response)
+
+    # then
+    error = content["data"]["channelUpdate"]["errors"][0]
+    assert error["field"] == "deleteExpiredOrdersAfter"
+    assert error["code"] == ChannelErrorCode.INVALID.name
+
+
+@patch("saleor.discount.tasks.decrease_voucher_codes_usage_task.delay")
+def test_channel_update_order_settings_voucher_usage_disable(
+    decrease_voucher_codes_usage_task_mock,
+    permission_manage_orders,
+    staff_api_client,
+    channel_USD,
+    draft_order_list_with_multiple_use_voucher,
+):
+    # given
+    channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
+    channel_USD.include_draft_order_in_voucher_usage = True
+    channel_USD.save(update_fields=["include_draft_order_in_voucher_usage"])
+
+    variables = {
+        "id": channel_id,
+        "input": {
+            "orderSettings": {
+                "includeDraftOrderInVoucherUsage": False,
+            },
+        },
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CHANNEL_UPDATE_MUTATION,
+        variables=variables,
+        permissions=(permission_manage_orders,),
+    )
+    content = get_graphql_content(response)
+
+    # then
+    data = content["data"]["channelUpdate"]
+    assert not data["errors"]
+    assert data["channel"]["orderSettings"]["includeDraftOrderInVoucherUsage"] is False
+    decrease_voucher_codes_usage_task_mock.assert_called_once()
+
+
+@patch("saleor.discount.tasks.disconnect_voucher_codes_from_draft_orders_task.delay")
+def test_channel_update_order_settings_voucher_usage_enable(
+    disconnect_voucher_codes_from_draft_orders_task_mock,
+    permission_manage_orders,
+    staff_api_client,
+    channel_USD,
+    draft_order_list_with_multiple_use_voucher,
+):
+    # given
+    channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
+    channel_USD.include_draft_order_in_voucher_usage = False
+    channel_USD.save(update_fields=["include_draft_order_in_voucher_usage"])
+
+    variables = {
+        "id": channel_id,
+        "input": {
+            "orderSettings": {
+                "includeDraftOrderInVoucherUsage": True,
+            },
+        },
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CHANNEL_UPDATE_MUTATION,
+        variables=variables,
+        permissions=(permission_manage_orders,),
+    )
+    content = get_graphql_content(response)
+
+    # then
+    data = content["data"]["channelUpdate"]
+    assert not data["errors"]
+    assert data["channel"]["orderSettings"]["includeDraftOrderInVoucherUsage"] is True
+    disconnect_voucher_codes_from_draft_orders_task_mock.assert_called_once()
+
+
+CHANNEL_UPDATE_MUTATION_WITH_CHECKOUT_SETTINGS = """
+    mutation UpdateChannel($id: ID!,$input: ChannelUpdateInput!){
+        channelUpdate(id: $id, input: $input){
+            channel{
+                id
+                name
+                slug
+                currencyCode
+                checkoutSettings {
+                    useLegacyErrorFlow
+                }
+            }
+            errors{
+                field
+                code
+                message
+                shippingZones
+                warehouses
+            }
+        }
+    }
+"""
+
+
+def test_channel_update_set_checkout_use_legacy_error_flow(
+    permission_manage_channels, staff_api_client, channel_USD
+):
+    # given
+    channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
+    variables = {
+        "id": channel_id,
+        "input": {
+            "checkoutSettings": {"useLegacyErrorFlow": False},
+        },
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CHANNEL_UPDATE_MUTATION_WITH_CHECKOUT_SETTINGS,
+        variables=variables,
+        permissions=(permission_manage_channels,),
+    )
+    content = get_graphql_content(response)
+
+    # then
+    data = content["data"]["channelUpdate"]
+    assert not data["errors"]
+    channel_data = data["channel"]
+    channel_USD.refresh_from_db()
+    assert channel_data["checkoutSettings"]["useLegacyErrorFlow"] is False
+    assert channel_USD.use_legacy_error_flow_for_checkout is False
+
+
+def test_channel_update_set_checkout_use_legacy_error_flow_with_checkout_permission(
+    permission_manage_checkouts, staff_api_client, channel_USD
+):
+    # given
+    channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
+    variables = {
+        "id": channel_id,
+        "input": {
+            "checkoutSettings": {"useLegacyErrorFlow": False},
+        },
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CHANNEL_UPDATE_MUTATION_WITH_CHECKOUT_SETTINGS,
+        variables=variables,
+        permissions=(permission_manage_checkouts,),
+    )
+    content = get_graphql_content(response)
+
+    # then
+    data = content["data"]["channelUpdate"]
+    assert not data["errors"]
+    channel_data = data["channel"]
+    channel_USD.refresh_from_db()
+    assert channel_data["checkoutSettings"]["useLegacyErrorFlow"] is False
+    assert channel_USD.use_legacy_error_flow_for_checkout is False
+
+
+def test_channel_update_set_checkout_use_legacy_error_flow_without_permission(
+    staff_api_client, channel_USD
+):
+    # given
+    channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
+    variables = {
+        "id": channel_id,
+        "input": {
+            "checkoutSettings": {"useLegacyErrorFlow": False},
+        },
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CHANNEL_UPDATE_MUTATION_WITH_CHECKOUT_SETTINGS,
+        variables=variables,
+    )
+
+    # then
+    assert_no_permission(response)
+
+
+def test_channel_update_checkout_and_order_settings_with_manage_orders(
+    staff_api_client, channel_USD, permission_manage_orders
+):
+    # given
+    channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
+    variables = {
+        "id": channel_id,
+        "input": {
+            "checkoutSettings": {"useLegacyErrorFlow": False},
+            "orderSettings": {"automaticallyConfirmAllNewOrders": False},
+        },
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CHANNEL_UPDATE_MUTATION_WITH_CHECKOUT_SETTINGS,
+        variables=variables,
+        permissions=[permission_manage_orders],
+    )
+
+    # then
+    assert_no_permission(response)
+
+
+def test_channel_update_order_and_checkout_settings_with_manage_checkouts(
+    staff_api_client, channel_USD, permission_manage_checkouts
+):
+    # given
+    channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
+    variables = {
+        "id": channel_id,
+        "input": {
+            "orderSettings": {"automaticallyConfirmAllNewOrders": False},
+            "checkoutSettings": {"useLegacyErrorFlow": False},
+        },
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CHANNEL_UPDATE_MUTATION_WITH_CHECKOUT_SETTINGS,
+        variables=variables,
+        permissions=[permission_manage_checkouts],
+    )
+
+    # then
+    assert_no_permission(response)
+
+
+def test_channel_update_with_order_and_checkout_settings(
+    staff_api_client, channel_USD, permission_manage_checkouts, permission_manage_orders
+):
+    # given
+    channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
+    variables = {
+        "id": channel_id,
+        "input": {
+            "orderSettings": {"automaticallyConfirmAllNewOrders": False},
+            "checkoutSettings": {"useLegacyErrorFlow": False},
+        },
+    }
+    query = """
+    mutation UpdateChannel($id: ID!,$input: ChannelUpdateInput!){
+        channelUpdate(id: $id, input: $input){
+            channel{
+                id
+                name
+                slug
+                currencyCode
+                checkoutSettings {
+                    useLegacyErrorFlow
+                }
+                orderSettings {
+                    automaticallyConfirmAllNewOrders
+                }
+            }
+            errors{
+                field
+                code
+                message
+                shippingZones
+                warehouses
+            }
+        }
+    }
+    """
+
+    # when
+    response = staff_api_client.post_graphql(
+        query,
+        variables=variables,
+        permissions=[permission_manage_checkouts, permission_manage_orders],
+    )
+
+    # then
+    content = get_graphql_content(response)
+
+    data = content["data"]["channelUpdate"]
+    assert not data["errors"]
+    channel_data = data["channel"]
+    channel_USD.refresh_from_db()
+    assert channel_data["checkoutSettings"]["useLegacyErrorFlow"] is False
+    assert channel_USD.use_legacy_error_flow_for_checkout is False
+    assert channel_data["orderSettings"]["automaticallyConfirmAllNewOrders"] is False
+    assert channel_USD.automatically_confirm_all_new_orders is False
+
+
+CHANNEL_UPDATE_MUTATION_WITH_PAYMENT_SETTINGS = """
+    mutation UpdateChannel($id: ID!,$input: ChannelUpdateInput!){
+        channelUpdate(id: $id, input: $input){
+            channel{
+                id
+                name
+                slug
+                currencyCode
+                paymentSettings {
+                    defaultTransactionFlowStrategy
+                }
+            }
+            errors{
+                field
+                code
+                message
+                shippingZones
+                warehouses
+            }
+        }
+    }
+"""
+
+
+def test_channel_update_default_transaction_flow_strategy(
+    permission_manage_channels,
+    staff_api_client,
+    channel_USD,
+):
+    # given
+    channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
+    variables = {
+        "id": channel_id,
+        "input": {
+            "paymentSettings": {
+                "defaultTransactionFlowStrategy": (
+                    TransactionFlowStrategyEnum.AUTHORIZATION.name
+                ),
+            },
+        },
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CHANNEL_UPDATE_MUTATION_WITH_PAYMENT_SETTINGS,
+        variables=variables,
+        permissions=(permission_manage_channels,),
+    )
+    content = get_graphql_content(response)
+
+    # then
+    data = content["data"]["channelUpdate"]
+    assert not data["errors"]
+    channel_data = data["channel"]
+    assert (
+        channel_data["paymentSettings"]["defaultTransactionFlowStrategy"]
+        == TransactionFlowStrategyEnum.AUTHORIZATION.name
+    )
+    channel_USD.refresh_from_db()
+    assert (
+        channel_USD.default_transaction_flow_strategy
+        == TransactionFlowStrategyEnum.AUTHORIZATION.value
+    )
+
+
+def test_channel_update_default_transaction_flow_strategy_with_payment_permission(
+    permission_manage_payments,
+    staff_api_client,
+    channel_USD,
+):
+    # given
+    channel_id = graphene.Node.to_global_id("Channel", channel_USD.id)
+    variables = {
+        "id": channel_id,
+        "input": {
+            "paymentSettings": {
+                "defaultTransactionFlowStrategy": (
+                    TransactionFlowStrategyEnum.AUTHORIZATION.name
+                ),
+            },
+        },
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CHANNEL_UPDATE_MUTATION_WITH_PAYMENT_SETTINGS,
+        variables=variables,
+        permissions=(permission_manage_payments,),
+    )
+    content = get_graphql_content(response)
+
+    # then
+    data = content["data"]["channelUpdate"]
+    assert not data["errors"]
+    channel_data = data["channel"]
+    assert (
+        channel_data["paymentSettings"]["defaultTransactionFlowStrategy"]
+        == TransactionFlowStrategyEnum.AUTHORIZATION.name
+    )
+    channel_USD.refresh_from_db()
+    assert (
+        channel_USD.default_transaction_flow_strategy
+        == TransactionFlowStrategyEnum.AUTHORIZATION.value
+    )

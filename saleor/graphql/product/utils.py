@@ -1,21 +1,23 @@
 from collections import defaultdict, namedtuple
-from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Optional
 
 import graphene
 from django.core.exceptions import ValidationError
 from django.db import DatabaseError, transaction
 from django.db.utils import IntegrityError
+from graphql import GraphQLError
 
 from ...core.tracing import traced_atomic_transaction
 from ...order import OrderStatus
 from ...order import models as order_models
 from ...warehouse.models import Stock
 from ..core.enums import ProductErrorCode
+from .sorters import ProductOrderField
 
 if TYPE_CHECKING:
-    from django.db.models import QuerySet
-
     from ...product.models import ProductVariant
+    from ...warehouse.models import Warehouse
 
 import logging
 
@@ -71,7 +73,9 @@ def get_used_variants_attribute_values(product):
 
 @traced_atomic_transaction()
 def create_stocks(
-    variant: "ProductVariant", stocks_data: List[Dict[str, str]], warehouses: "QuerySet"
+    variant: "ProductVariant",
+    stocks_data: list[dict[str, str]],
+    warehouses: Iterable["Warehouse"],
 ):
     try:
         new_stocks = Stock.objects.bulk_create(
@@ -101,8 +105,8 @@ def get_draft_order_lines_data_for_variants(
     lines = order_models.OrderLine.objects.filter(
         variant__id__in=variant_ids, order__status=OrderStatus.DRAFT
     ).select_related("order")
-    order_to_lines_mapping: Dict[
-        order_models.Order, List[order_models.OrderLine]
+    order_to_lines_mapping: dict[
+        order_models.Order, list[order_models.OrderLine]
     ] = defaultdict(list)
     line_pks = set()
     order_pks = set()
@@ -129,11 +133,9 @@ def update_ordered_media(ordered_media):
                 media.save(update_fields=["sort_order"])
             except DatabaseError as e:
                 msg = (
-                    "Cannot update media for instance: %s. "
+                    f"Cannot update media for instance: {media}. "
                     "Updating not existing object. "
-                    "Details: %s.",
-                    media,
-                    str(e),
+                    f"Details: {e}."
                 )
                 logger.warning(msg)
                 errors["media"].append(
@@ -142,3 +144,30 @@ def update_ordered_media(ordered_media):
 
     if errors:
         raise ValidationError(errors)
+
+
+def search_string_in_kwargs(kwargs: dict) -> bool:
+    filter_search = kwargs.get("filter", {}).get("search", "") or ""
+    search = kwargs.get("search", "") or ""
+    return bool(filter_search.strip()) or bool(search.strip())
+
+
+def sort_field_from_kwargs(kwargs: dict) -> Optional[list[str]]:
+    return kwargs.get("sort_by", {}).get("field") or None
+
+
+def check_for_sorting_by_rank(info, kwargs: dict):
+    if sort_field_from_kwargs(kwargs) == ProductOrderField.RANK:
+        # sort by RANK can be used only with search filter
+        if not search_string_in_kwargs(kwargs):
+            raise GraphQLError(
+                "Sorting by RANK is available only when using a search filter "
+                "or search argument."
+            )
+    if search_string_in_kwargs(kwargs) and not sort_field_from_kwargs(kwargs):
+        # default to sorting by RANK if search is used
+        # and no explicit sorting is requested
+        product_type = info.schema.get_type("ProductOrder")
+        kwargs["sort_by"] = product_type.create_container(
+            {"direction": "-", "field": ["search_rank", "id"]}
+        )

@@ -1,7 +1,7 @@
 import datetime
 import math
 from collections import defaultdict
-from typing import Dict, Iterable, List, Optional
+from typing import Optional, TypedDict
 
 import django_filters
 import graphene
@@ -14,7 +14,6 @@ from django.utils import timezone
 
 from ...attribute import AttributeInputType
 from ...attribute.models import (
-    AssignedProductAttribute,
     AssignedProductAttributeValue,
     AssignedVariantAttribute,
     AssignedVariantAttributeValue,
@@ -36,25 +35,49 @@ from ...product.models import (
 from ...product.search import search_products
 from ...warehouse.models import Allocation, Reservation, Stock, Warehouse
 from ..channel.filters import get_channel_slug_from_filter_data
-from ..core.descriptions import ADDED_IN_38
+from ..core.descriptions import ADDED_IN_38, ADDED_IN_317
+from ..core.doc_category import DOC_CATEGORY_PRODUCTS
 from ..core.filters import (
+    BooleanWhereFilter,
     EnumFilter,
+    EnumWhereFilter,
     GlobalIDMultipleChoiceFilter,
+    GlobalIDMultipleChoiceWhereFilter,
     ListObjectTypeFilter,
+    ListObjectTypeWhereFilter,
     MetadataFilterBase,
+    MetadataWhereFilterBase,
     ObjectTypeFilter,
+    ObjectTypeWhereFilter,
+    OperationObjectTypeWhereFilter,
     filter_slug_list,
 )
 from ..core.types import (
+    BaseInputObjectType,
     ChannelFilterInputObjectType,
+    DateTimeFilterInput,
     DateTimeRangeInput,
     FilterInputObjectType,
     IntRangeInput,
     NonNullList,
     PriceRangeInput,
+    StringFilterInput,
+)
+from ..core.types.filter_input import (
+    DecimalFilterInput,
+    GlobalIDFilterInput,
+    WhereInputObjectType,
 )
 from ..utils import resolve_global_ids_to_primary_keys
-from ..utils.filters import filter_by_id, filter_range_field
+from ..utils.filters import (
+    filter_by_id,
+    filter_by_ids,
+    filter_range_field,
+    filter_where_by_id_field,
+    filter_where_by_numeric_field,
+    filter_where_by_string_field,
+    filter_where_range_field,
+)
 from ..warehouse import types as warehouse_types
 from . import types as product_types
 from .enums import (
@@ -65,7 +88,7 @@ from .enums import (
     StockAvailability,
 )
 
-T_PRODUCT_FILTER_QUERIES = Dict[int, Iterable[int]]
+T_PRODUCT_FILTER_QUERIES = dict[int, list[int]]
 
 
 def _clean_product_attributes_filter_input(filter_value, queries):
@@ -74,16 +97,20 @@ def _clean_product_attributes_filter_input(filter_value, queries):
     for attr_slug, val_slugs in filter_value:
         attribute_slugs.append(attr_slug)
         value_slugs.extend(val_slugs)
-    attributes_slug_pk_map: Dict[str, int] = {}
-    attributes_pk_slug_map: Dict[int, str] = {}
-    values_map: Dict[str, Dict[str, int]] = defaultdict(dict)
+    attributes_slug_pk_map: dict[str, int] = {}
+    attributes_pk_slug_map: dict[int, str] = {}
+    values_map: dict[str, dict[str, int]] = defaultdict(dict)
     for attr_slug, attr_pk in Attribute.objects.filter(
         slug__in=attribute_slugs
     ).values_list("slug", "id"):
         attributes_slug_pk_map[attr_slug] = attr_pk
         attributes_pk_slug_map[attr_pk] = attr_slug
 
-    for (attr_pk, value_pk, value_slug,) in AttributeValue.objects.filter(
+    for (
+        attr_pk,
+        value_pk,
+        value_slug,
+    ) in AttributeValue.objects.filter(
         slug__in=value_slugs, attribute_id__in=attributes_pk_slug_map.keys()
     ).values_list("attribute_id", "pk", "slug"):
         attr_slug = attributes_pk_slug_map[attr_pk]
@@ -93,7 +120,7 @@ def _clean_product_attributes_filter_input(filter_value, queries):
     # attributes are keys and values are grouped in lists
     for attr_name, val_slugs in filter_value:
         if attr_name not in attributes_slug_pk_map:
-            raise ValueError("Unknown attribute name: %r" % (attr_name,))
+            raise ValueError(f"Unknown attribute name: {attr_name}")
         attr_pk = attributes_slug_pk_map[attr_name]
         attr_val_pk = [
             values_map[attr_name][val_slug]
@@ -113,26 +140,29 @@ def _clean_product_attributes_range_filter_input(filter_value, queries):
         .select_related("attribute")
     )
 
-    attributes_map: Dict[str, int] = {}
-    values_map: Dict[str, Dict[str, int]] = defaultdict(dict)
+    attributes_map: dict[str, int] = {}
+    values_map: defaultdict[str, defaultdict[str, list[int]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
     for value_data in values.values_list(
         "attribute_id", "attribute__slug", "pk", "numeric_value"
     ):
         attr_pk, attr_slug, pk, numeric_value = value_data
         attributes_map[attr_slug] = attr_pk
-        values_map[attr_slug][numeric_value] = pk
+        values_map[attr_slug][numeric_value].append(pk)
 
     for attr_name, val_range in filter_value:
         if attr_name not in attributes_map:
-            raise ValueError("Unknown numeric attribute name: %r" % (attr_name,))
+            raise ValueError(f"Unknown numeric attribute name: {attr_name}")
         gte, lte = val_range.get("gte", 0), val_range.get("lte", math.inf)
         attr_pk = attributes_map[attr_name]
         attr_values = values_map[attr_name]
         matching_values = [
             value for value in attr_values.keys() if gte <= value and lte >= value
         ]
-        attr_val_pks = [attr_values[value] for value in matching_values]
-        queries[attr_pk] += attr_val_pks
+        queries[attr_pk] = []
+        for value in matching_values:
+            queries[attr_pk] += attr_values[value]
 
 
 def _clean_product_attributes_date_time_range_filter_input(filter_value):
@@ -157,12 +187,17 @@ def _clean_product_attributes_date_time_range_filter_input(filter_value):
     return matching_attributes.filter(**filters)
 
 
+class KeyValueDict(TypedDict):
+    pk: int
+    values: dict[Optional[bool], int]
+
+
 def _clean_product_attributes_boolean_filter_input(filter_value, queries):
     attribute_slugs = [slug for slug, _ in filter_value]
     attributes = Attribute.objects.filter(
         input_type=AttributeInputType.BOOLEAN, slug__in=attribute_slugs
     ).prefetch_related("values")
-    values_map = {
+    values_map: dict[str, KeyValueDict] = {
         attr.slug: {
             "pk": attr.pk,
             "values": {val.boolean: val.pk for val in attr.values.all()},
@@ -183,13 +218,8 @@ def filter_products_by_attributes_values(qs, queries: T_PRODUCT_FILTER_QUERIES):
         assigned_product_attribute_values = (
             AssignedProductAttributeValue.objects.filter(value_id__in=values)
         )
-        assigned_product_attributes = AssignedProductAttribute.objects.filter(
-            Exists(
-                assigned_product_attribute_values.filter(assignment_id=OuterRef("pk"))
-            )
-        )
         product_attribute_filter = Q(
-            Exists(assigned_product_attributes.filter(product_id=OuterRef("pk")))
+            Exists(assigned_product_attribute_values.filter(product_id=OuterRef("pk")))
         )
 
         assigned_variant_attribute_values = (
@@ -216,11 +246,8 @@ def filter_products_by_attributes_values_qs(qs, values_qs):
     assigned_product_attribute_values = AssignedProductAttributeValue.objects.filter(
         value__in=values_qs
     )
-    assigned_product_attributes = AssignedProductAttribute.objects.filter(
-        Exists(assigned_product_attribute_values.filter(assignment_id=OuterRef("pk")))
-    )
     product_attribute_filter = Q(
-        Exists(assigned_product_attributes.filter(product_id=OuterRef("pk")))
+        Exists(assigned_product_attribute_values.filter(product_id=OuterRef("pk")))
     )
 
     assigned_variant_attribute_values = AssignedVariantAttributeValue.objects.filter(
@@ -247,7 +274,7 @@ def filter_products_by_attributes(
     date_range_list,
     date_time_range_list,
 ):
-    queries: Dict[int, List[Optional[int]]] = defaultdict(list)
+    queries: dict[int, list[int]] = defaultdict(list)
     try:
         if filter_values:
             _clean_product_attributes_filter_input(filter_values, queries)
@@ -642,9 +669,12 @@ def filter_updated_at_range(qs, _, value):
     return filter_range_field(qs, "updated_at", value)
 
 
-class ProductStockFilterInput(graphene.InputObjectType):
+class ProductStockFilterInput(BaseInputObjectType):
     warehouse_ids = NonNullList(graphene.ID, required=False)
     quantity = graphene.Field(IntRangeInput, required=False)
+
+    class Meta:
+        doc_category = DOC_CATEGORY_PRODUCTS
 
 
 class ProductFilter(MetadataFilterBase):
@@ -780,6 +810,385 @@ class ProductFilter(MetadataFilterBase):
         return _filter_stock_availability(queryset, name, value, channel_slug)
 
 
+def where_filter_products_is_available(qs, _, value, channel_slug):
+    if value is None:
+        return qs.none()
+    channel = Channel.objects.filter(slug=channel_slug).values("pk")
+    now = datetime.datetime.now(pytz.UTC)
+    if value:
+        product_channel_listings = ProductChannelListing.objects.filter(
+            Exists(channel.filter(pk=OuterRef("channel_id"))),
+            available_for_purchase_at__lte=now,
+        ).values("product_id")
+    else:
+        product_channel_listings = ProductChannelListing.objects.filter(
+            Exists(channel.filter(pk=OuterRef("channel_id"))),
+            Q(available_for_purchase_at__gt=now)
+            | Q(available_for_purchase_at__isnull=True),
+        ).values("product_id")
+
+    return qs.filter(Exists(product_channel_listings.filter(product_id=OuterRef("pk"))))
+
+
+def where_filter_products_channel_field_from_date(qs, _, value, channel_slug, field):
+    if value is None:
+        return qs.none()
+    channel = Channel.objects.filter(slug=channel_slug).values("pk")
+    lookup = {
+        f"{field}__lte": value,
+    }
+    product_channel_listings = ProductChannelListing.objects.filter(
+        Exists(channel.filter(pk=OuterRef("channel_id"))),
+        **lookup,
+    ).values("product_id")
+
+    return qs.filter(Exists(product_channel_listings.filter(product_id=OuterRef("pk"))))
+
+
+def where_filter_has_category(qs, _, value):
+    if value is None:
+        return qs.none()
+    return qs.filter(category__isnull=not value)
+
+
+def where_filter_attributes(qs, _, value):
+    if not value:
+        return qs.none()
+
+    value_list = []
+    boolean_list = []
+    value_range_list = []
+    date_range_list = []
+    date_time_range_list = []
+
+    for v in value:
+        slug = v["slug"]
+        if "values" in v:
+            value_list.append((slug, v["values"]))
+        elif "values_range" in v:
+            value_range_list.append((slug, v["values_range"]))
+        elif "date" in v:
+            date_range_list.append((slug, v["date"]))
+        elif "date_time" in v:
+            date_time_range_list.append((slug, v["date_time"]))
+        elif "boolean" in v:
+            boolean_list.append((slug, v["boolean"]))
+
+    qs = filter_products_by_attributes(
+        qs,
+        value_list,
+        value_range_list,
+        boolean_list,
+        date_range_list,
+        date_time_range_list,
+    )
+    return qs
+
+
+def where_filter_stocks(qs, _, value):
+    if not value:
+        return qs.none()
+    warehouse_ids = value.get("warehouse_ids")
+    quantity = value.get("quantity")
+    if warehouse_ids and not quantity:
+        return where_filter_warehouses(qs, _, warehouse_ids)
+    if quantity and not warehouse_ids:
+        return where_filter_quantity(qs, quantity)
+    if quantity and warehouse_ids:
+        return where_filter_quantity(qs, quantity, warehouse_ids)
+    return qs.none()
+
+
+def where_filter_warehouses(qs, _, value):
+    if not value:
+        return qs.none()
+    _, warehouse_pks = resolve_global_ids_to_primary_keys(
+        value, warehouse_types.Warehouse
+    )
+    warehouses = Warehouse.objects.filter(pk__in=warehouse_pks).values("pk")
+    variant_ids = Stock.objects.filter(
+        Exists(warehouses.filter(pk=OuterRef("warehouse")))
+    ).values("product_variant_id")
+    variants = ProductVariant.objects.filter(id__in=variant_ids).values("pk")
+    return qs.filter(Exists(variants.filter(product=OuterRef("pk"))))
+
+
+def where_filter_quantity(qs, quantity_value, warehouse_ids=None):
+    """Filter products queryset by product variants quantity.
+
+    Return product queryset which contains at least one variant with aggregated quantity
+    between given range. If warehouses is given, it aggregates quantity only
+    from stocks which are in given warehouses.
+    """
+    stocks = Stock.objects.all()
+    if warehouse_ids:
+        _, warehouse_pks = resolve_global_ids_to_primary_keys(
+            warehouse_ids, warehouse_types.Warehouse
+        )
+        stocks = stocks.filter(warehouse_id__in=warehouse_pks)
+    stocks = stocks.values("product_variant_id").filter(
+        product_variant_id=OuterRef("pk")
+    )
+
+    stocks = Subquery(stocks.values_list(Sum("quantity")))
+    variants = ProductVariant.objects.annotate(
+        total_quantity=ExpressionWrapper(stocks, output_field=IntegerField())
+    )
+    variants = list(
+        _filter_range(variants, "total_quantity", quantity_value).values_list(
+            "product_id", flat=True
+        )
+    )
+    return qs.filter(pk__in=variants)
+
+
+def _filter_range(qs, field, value):
+    gte, lte = value.get("gte"), value.get("lte")
+    if gte is None and lte is None:
+        return qs.none()
+    return filter_range_field(qs, field, value)
+
+
+def where_filter_stock_availability(qs, _, value, channel_slug):
+    if value:
+        return filter_products_by_stock_availability(qs, value, channel_slug)
+    return qs.none()
+
+
+def where_filter_gift_card(qs, _, value):
+    if value is None:
+        return qs.none()
+
+    product_types = ProductType.objects.filter(kind=ProductTypeKind.GIFT_CARD)
+    lookup = Exists(product_types.filter(id=OuterRef("product_type_id")))
+    return qs.filter(lookup) if value is True else qs.exclude(lookup)
+
+
+def where_filter_has_preordered_variants(qs, _, value):
+    if value is None:
+        return qs.none()
+
+    variants = (
+        ProductVariant.objects.filter(is_preorder=True)
+        .filter(
+            Q(preorder_end_date__isnull=True) | Q(preorder_end_date__gt=timezone.now())
+        )
+        .values("product_id")
+    )
+    if value:
+        return qs.filter(Exists(variants.filter(product_id=OuterRef("pk"))))
+    else:
+        return qs.filter(~Exists(variants.filter(product_id=OuterRef("pk"))))
+
+
+def where_filter_updated_at_range(qs, _, value):
+    if value is None:
+        return qs.none()
+    return filter_where_range_field(qs, "updated_at", value)
+
+
+class ProductWhere(MetadataWhereFilterBase):
+    ids = GlobalIDMultipleChoiceWhereFilter(method=filter_by_ids("Product"))
+    name = OperationObjectTypeWhereFilter(
+        input_class=StringFilterInput,
+        method="filter_product_name",
+        help_text="Filter by product name.",
+    )
+    slug = OperationObjectTypeWhereFilter(
+        input_class=StringFilterInput,
+        method="filter_product_slug",
+        help_text="Filter by product slug.",
+    )
+    product_type = OperationObjectTypeWhereFilter(
+        input_class=GlobalIDFilterInput,
+        method="filter_product_type",
+        help_text="Filter by product type.",
+    )
+    category = OperationObjectTypeWhereFilter(
+        input_class=GlobalIDFilterInput,
+        method="filter_category",
+        help_text="Filter by product category.",
+    )
+    collection = OperationObjectTypeWhereFilter(
+        input_class=GlobalIDFilterInput,
+        method="filter_collection",
+        help_text="Filter by collection.",
+    )
+    is_available = BooleanWhereFilter(
+        method="filter_is_available", help_text="Filter by availability for purchase."
+    )
+    is_published = BooleanWhereFilter(
+        method="filter_is_published", help_text="Filter by public visibility."
+    )
+    is_visible_in_listing = BooleanWhereFilter(
+        method="filter_is_listed", help_text="Filter by visibility on the channel."
+    )
+    published_from = ObjectTypeWhereFilter(
+        input_class=graphene.DateTime,
+        method="filter_published_from",
+        help_text="Filter by the publication date.",
+    )
+    available_from = ObjectTypeWhereFilter(
+        input_class=graphene.DateTime,
+        method="filter_available_from",
+        help_text="Filter by the date of availability for purchase.",
+    )
+    has_category = BooleanWhereFilter(
+        method=where_filter_has_category,
+        help_text="Filter by product with category assigned.",
+    )
+    price = OperationObjectTypeWhereFilter(
+        input_class=DecimalFilterInput,
+        method="filter_variant_price",
+        help_text="Filter by product variant price.",
+    )
+    minimal_price = OperationObjectTypeWhereFilter(
+        input_class=DecimalFilterInput,
+        method="filter_minimal_price",
+        field_name="minimal_price_amount",
+        help_text="Filter by the lowest variant price after discounts.",
+    )
+    attributes = ListObjectTypeWhereFilter(
+        input_class="saleor.graphql.attribute.types.AttributeInput",
+        method="filter_attributes",
+        help_text="Filter by attributes associated with the product.",
+    )
+    stock_availability = EnumWhereFilter(
+        input_class=StockAvailability,
+        method="filter_stock_availability",
+        help_text="Filter by variants having specific stock status.",
+    )
+    stocks = ObjectTypeWhereFilter(
+        input_class=ProductStockFilterInput,
+        method=where_filter_stocks,
+        help_text="Filter by stock of the product variant.",
+    )
+    gift_card = BooleanWhereFilter(
+        method=where_filter_gift_card,
+        help_text="Filter on whether product is a gift card or not.",
+    )
+    has_preordered_variants = BooleanWhereFilter(
+        method=where_filter_has_preordered_variants,
+        help_text="Filter by product with preordered variants.",
+    )
+    updated_at = ObjectTypeWhereFilter(
+        input_class=DateTimeFilterInput,
+        method=where_filter_updated_at_range,
+        help_text="Filter by when was the most recent update.",
+    )
+
+    class Meta:
+        model = Product
+        fields = []
+
+    @staticmethod
+    def filter_product_name(qs, _, value):
+        return filter_where_by_string_field(qs, "name", value)
+
+    @staticmethod
+    def filter_product_slug(qs, _, value):
+        return filter_where_by_string_field(qs, "slug", value)
+
+    @staticmethod
+    def filter_product_type(qs, _, value):
+        return filter_where_by_id_field(qs, "product_type", value, "ProductType")
+
+    @staticmethod
+    def filter_category(qs, _, value):
+        return filter_where_by_id_field(qs, "category", value, "Category")
+
+    @staticmethod
+    def filter_collection(qs, _, value):
+        collection_products_qs = CollectionProduct.objects.filter()
+        collection_products_qs = filter_where_by_id_field(
+            collection_products_qs, "collection_id", value, "Collection"
+        )
+        collection_products = collection_products_qs.values("product_id")
+        return qs.filter(Exists(collection_products.filter(product_id=OuterRef("pk"))))
+
+    def filter_is_available(self, queryset, name, value):
+        channel_slug = get_channel_slug_from_filter_data(self.data)
+        return where_filter_products_is_available(
+            queryset,
+            name,
+            value,
+            channel_slug,
+        )
+
+    def filter_is_published(self, queryset, name, value):
+        channel_slug = get_channel_slug_from_filter_data(self.data)
+        return _filter_products_is_published(
+            queryset,
+            name,
+            value,
+            channel_slug,
+        )
+
+    def filter_is_listed(self, queryset, name, value):
+        channel_slug = get_channel_slug_from_filter_data(self.data)
+        return _filter_products_visible_in_listing(
+            queryset,
+            name,
+            value,
+            channel_slug,
+        )
+
+    def filter_published_from(self, queryset, name, value):
+        channel_slug = get_channel_slug_from_filter_data(self.data)
+        return where_filter_products_channel_field_from_date(
+            queryset,
+            name,
+            value,
+            channel_slug,
+            "published_at",
+        )
+
+    def filter_available_from(self, queryset, name, value):
+        channel_slug = get_channel_slug_from_filter_data(self.data)
+        return where_filter_products_channel_field_from_date(
+            queryset,
+            name,
+            value,
+            channel_slug,
+            "available_for_purchase_at",
+        )
+
+    def filter_variant_price(self, qs, _, value):
+        channel_slug = get_channel_slug_from_filter_data(self.data)
+        channel_id = Channel.objects.filter(slug=channel_slug).values("pk")
+        variant_listing = ProductVariantChannelListing.objects.filter(
+            Exists(channel_id.filter(pk=OuterRef("channel_id")))
+        )
+        variant_listing = filter_where_by_numeric_field(
+            variant_listing, "price_amount", value
+        )
+        variant_listing = variant_listing.values("variant_id")
+        variants = ProductVariant.objects.filter(
+            Exists(variant_listing.filter(variant_id=OuterRef("pk")))
+        ).values("product_id")
+        return qs.filter(Exists(variants.filter(product_id=OuterRef("pk"))))
+
+    def filter_minimal_price(self, qs, _, value):
+        channel_slug = get_channel_slug_from_filter_data(self.data)
+        channel = Channel.objects.filter(slug=channel_slug).first()
+        if not channel:
+            return qs
+        product_listing = ProductChannelListing.objects.filter(channel_id=channel.id)
+        product_listing = filter_where_by_numeric_field(
+            product_listing, "discounted_price_amount", value
+        )
+        product_listing = product_listing.values("product_id")
+        return qs.filter(Exists(product_listing.filter(product_id=OuterRef("pk"))))
+
+    @staticmethod
+    def filter_attributes(queryset, name, value):
+        return where_filter_attributes(queryset, name, value)
+
+    def filter_stock_availability(self, queryset, name, value):
+        channel_slug = get_channel_slug_from_filter_data(self.data)
+        return where_filter_stock_availability(queryset, name, value, channel_slug)
+
+
 class ProductVariantFilter(MetadataFilterBase):
     search = django_filters.CharFilter(method="product_variant_filter_search")
     sku = ListObjectTypeFilter(input_class=graphene.String, method=filter_sku_list)
@@ -799,6 +1208,14 @@ class ProductVariantFilter(MetadataFilterBase):
         products = Product.objects.filter(name__ilike=value).values("pk")
         qs |= Q(Exists(products.filter(variants=OuterRef("pk"))))
         return queryset.filter(qs)
+
+
+class ProductVariantWhere(MetadataWhereFilterBase):
+    ids = GlobalIDMultipleChoiceWhereFilter(method=filter_by_ids("ProductVariant"))
+
+    class Meta:
+        model = ProductVariant
+        fields = []
 
 
 class CollectionFilter(MetadataFilterBase):
@@ -828,10 +1245,23 @@ class CollectionFilter(MetadataFilterBase):
         return queryset
 
 
+class CollectionWhere(MetadataWhereFilterBase):
+    ids = GlobalIDMultipleChoiceWhereFilter(method=filter_by_ids("Collection"))
+
+    class Meta:
+        model = Collection
+        fields = []
+
+
 class CategoryFilter(MetadataFilterBase):
     search = django_filters.CharFilter(method="category_filter_search")
     ids = GlobalIDMultipleChoiceFilter(field_name="id")
     slugs = ListObjectTypeFilter(input_class=graphene.String, method=filter_slug_list)
+    updated_at = ObjectTypeFilter(
+        input_class=DateTimeRangeInput,
+        method=filter_updated_at_range,
+        help_text=f"Filter by when was the most recent update. {ADDED_IN_317}",
+    )
 
     class Meta:
         model = Category
@@ -848,6 +1278,14 @@ class CategoryFilter(MetadataFilterBase):
         )
 
         return queryset.filter(name_slug_desc_qs)
+
+
+class CategoryWhere(MetadataWhereFilterBase):
+    ids = GlobalIDMultipleChoiceWhereFilter(method=filter_by_ids("Category"))
+
+    class Meta:
+        model = Category
+        fields = []
 
 
 class ProductTypeFilter(MetadataFilterBase):
@@ -876,24 +1314,53 @@ class ProductTypeFilter(MetadataFilterBase):
 
 class ProductFilterInput(ChannelFilterInputObjectType):
     class Meta:
+        doc_category = DOC_CATEGORY_PRODUCTS
         filterset_class = ProductFilter
+
+
+class ProductWhereInput(WhereInputObjectType):
+    class Meta:
+        doc_category = DOC_CATEGORY_PRODUCTS
+        filterset_class = ProductWhere
 
 
 class ProductVariantFilterInput(FilterInputObjectType):
     class Meta:
+        doc_category = DOC_CATEGORY_PRODUCTS
         filterset_class = ProductVariantFilter
+
+
+class ProductVariantWhereInput(WhereInputObjectType):
+    class Meta:
+        doc_category = DOC_CATEGORY_PRODUCTS
+        filterset_class = ProductVariantWhere
 
 
 class CollectionFilterInput(ChannelFilterInputObjectType):
     class Meta:
+        doc_category = DOC_CATEGORY_PRODUCTS
         filterset_class = CollectionFilter
+
+
+class CollectionWhereInput(WhereInputObjectType):
+    class Meta:
+        doc_category = DOC_CATEGORY_PRODUCTS
+        filterset_class = CollectionWhere
 
 
 class CategoryFilterInput(FilterInputObjectType):
     class Meta:
+        doc_category = DOC_CATEGORY_PRODUCTS
         filterset_class = CategoryFilter
+
+
+class CategoryWhereInput(WhereInputObjectType):
+    class Meta:
+        doc_category = DOC_CATEGORY_PRODUCTS
+        filterset_class = CategoryWhere
 
 
 class ProductTypeFilterInput(FilterInputObjectType):
     class Meta:
+        doc_category = DOC_CATEGORY_PRODUCTS
         filterset_class = ProductTypeFilter

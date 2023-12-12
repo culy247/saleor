@@ -1,27 +1,32 @@
 from collections import defaultdict
+from typing import Optional
+from uuid import UUID
 
 import graphene
 from django.core.exceptions import ValidationError
 from django.template.defaultfilters import pluralize
 
 from ....core.exceptions import InsufficientStock
-from ....core.permissions import OrderPermissions
 from ....order import models as order_models
-from ....order.actions import create_fulfillments
+from ....order.actions import OrderFulfillmentLineInfo, create_fulfillments
 from ....order.error_codes import OrderErrorCode
-from ...app.dataloaders import load_app
+from ....permission.enums import OrderPermissions
+from ....webhook.event_types import WebhookEventAsyncType
+from ...app.dataloaders import get_app_promise
+from ...core import ResolveInfo
 from ...core.descriptions import ADDED_IN_36
+from ...core.doc_category import DOC_CATEGORY_ORDERS
 from ...core.mutations import BaseMutation
-from ...core.types import NonNullList, OrderError
-from ...core.utils import get_duplicated_values
-from ...plugins.dataloaders import load_plugin_manager
+from ...core.types import BaseInputObjectType, NonNullList, OrderError
+from ...core.utils import WebhookEventInfo, get_duplicated_values
+from ...plugins.dataloaders import get_plugin_manager_promise
 from ...site.dataloaders import get_site_promise
 from ...warehouse.types import Warehouse
 from ..types import Fulfillment, Order, OrderLine
 from ..utils import prepare_insufficient_stock_order_validation_errors
 
 
-class OrderFulfillStockInput(graphene.InputObjectType):
+class OrderFulfillStockInput(BaseInputObjectType):
     quantity = graphene.Int(
         description="The number of line items to be fulfilled from given warehouse.",
         required=True,
@@ -31,8 +36,11 @@ class OrderFulfillStockInput(graphene.InputObjectType):
         required=True,
     )
 
+    class Meta:
+        doc_category = DOC_CATEGORY_ORDERS
 
-class OrderFulfillLineInput(graphene.InputObjectType):
+
+class OrderFulfillLineInput(BaseInputObjectType):
     order_line_id = graphene.ID(
         description="The ID of the order line.", name="orderLineId"
     )
@@ -42,8 +50,11 @@ class OrderFulfillLineInput(graphene.InputObjectType):
         description="List of stock items to create.",
     )
 
+    class Meta:
+        doc_category = DOC_CATEGORY_ORDERS
 
-class OrderFulfillInput(graphene.InputObjectType):
+
+class OrderFulfillInput(BaseInputObjectType):
     lines = NonNullList(
         OrderFulfillLineInput,
         required=True,
@@ -62,13 +73,19 @@ class OrderFulfillInput(graphene.InputObjectType):
         required=False,
     )
 
+    class Meta:
+        doc_category = DOC_CATEGORY_ORDERS
 
-class FulfillmentUpdateTrackingInput(graphene.InputObjectType):
+
+class FulfillmentUpdateTrackingInput(BaseInputObjectType):
     tracking_number = graphene.String(description="Fulfillment tracking number.")
     notify_customer = graphene.Boolean(
         default_value=False,
         description="If true, send an email notification to the customer.",
     )
+
+    class Meta:
+        doc_category = DOC_CATEGORY_ORDERS
 
 
 class OrderFulfill(BaseMutation):
@@ -85,9 +102,28 @@ class OrderFulfill(BaseMutation):
 
     class Meta:
         description = "Creates new fulfillments for an order."
+        doc_category = DOC_CATEGORY_ORDERS
         permissions = (OrderPermissions.MANAGE_ORDERS,)
         error_type_class = OrderError
         error_type_field = "order_errors"
+        webhook_events_info = [
+            WebhookEventInfo(
+                type=WebhookEventAsyncType.FULFILLMENT_CREATED,
+                description="A new fulfillment is created.",
+            ),
+            WebhookEventInfo(
+                type=WebhookEventAsyncType.ORDER_FULFILLED,
+                description="Order is fulfilled.",
+            ),
+            WebhookEventInfo(
+                type=WebhookEventAsyncType.FULFILLMENT_TRACKING_NUMBER_UPDATED,
+                description="Sent when fulfillment tracking number is updated.",
+            ),
+            WebhookEventInfo(
+                type=WebhookEventAsyncType.FULFILLMENT_APPROVED,
+                description="A fulfillment is approved.",
+            ),
+        ]
 
     @classmethod
     def clean_lines(cls, order_lines, quantities_for_lines):
@@ -97,12 +133,10 @@ class OrderFulfill(BaseMutation):
 
             if line_total_quantity > line_quantity_unfulfilled:
                 msg = (
-                    "Only %(quantity)d item%(item_pluralize)s remaining "
-                    "to fulfill: %(order_line)s."
+                    "Only %(quantity)d item%(item_pluralize)s remaining to fulfill."
                 ) % {
                     "quantity": line_quantity_unfulfilled,
                     "item_pluralize": pluralize(line_quantity_unfulfilled),
-                    "order_line": order_line,
                 }
                 order_line_global_id = graphene.Node.to_global_id(
                     "OrderLine", order_line.pk
@@ -111,7 +145,7 @@ class OrderFulfill(BaseMutation):
                     {
                         "order_line_id": ValidationError(
                             msg,
-                            code=OrderErrorCode.FULFILL_ORDER_LINE,
+                            code=OrderErrorCode.FULFILL_ORDER_LINE.value,
                             params={"order_lines": [order_line_global_id]},
                         )
                     }
@@ -126,7 +160,7 @@ class OrderFulfill(BaseMutation):
                     {
                         "warehouse": ValidationError(
                             "Duplicated warehouse ID.",
-                            code=OrderErrorCode.DUPLICATED_INPUT_ITEM,
+                            code=OrderErrorCode.DUPLICATED_INPUT_ITEM.value,
                             params={"warehouse": duplicates.pop()},
                         )
                     }
@@ -140,7 +174,7 @@ class OrderFulfill(BaseMutation):
                 {
                     "orderLineId": ValidationError(
                         "Duplicated order line ID.",
-                        code=OrderErrorCode.DUPLICATED_INPUT_ITEM,
+                        code=OrderErrorCode.DUPLICATED_INPUT_ITEM.value,
                         params={"order_lines": [duplicates.pop()]},
                     )
                 }
@@ -157,27 +191,27 @@ class OrderFulfill(BaseMutation):
                     {
                         "order_line_id": ValidationError(
                             "Can not fulfill preorder variant.",
-                            code=OrderErrorCode.FULFILL_ORDER_LINE,
+                            code=OrderErrorCode.FULFILL_ORDER_LINE.value,
                             params={"order_lines": [order_line_global_id]},
                         )
                     }
                 )
 
     @classmethod
-    def check_total_quantity_of_items(cls, quantities_for_lines):
-        flat_quantities = sum(quantities_for_lines, [])
+    def check_total_quantity_of_items(cls, quantities_for_lines: list[list[int]]):
+        flat_quantities: list[int] = sum(quantities_for_lines, [])
         if sum(flat_quantities) <= 0:
             raise ValidationError(
                 {
                     "lines": ValidationError(
                         "Total quantity must be larger than 0.",
-                        code=OrderErrorCode.ZERO_QUANTITY,
+                        code=OrderErrorCode.ZERO_QUANTITY.value,
                     )
                 }
             )
 
     @classmethod
-    def clean_input(cls, info, order, data, site):
+    def clean_input(cls, info: ResolveInfo, order, data, site):
         if not order.is_fully_paid() and (
             site.settings.fulfillment_auto_approve
             and not site.settings.fulfillment_allow_unpaid
@@ -198,7 +232,7 @@ class OrderFulfill(BaseMutation):
         ]
         cls.check_warehouses_for_duplicates(warehouse_ids_for_lines)
 
-        quantities_for_lines = [
+        quantities_for_lines: list[list[int]] = [
             [stock["quantity"] for stock in line["stocks"]] for line in lines
         ]
 
@@ -215,12 +249,16 @@ class OrderFulfill(BaseMutation):
 
         cls.check_total_quantity_of_items(quantities_for_lines)
 
-        lines_for_warehouses = defaultdict(list)
+        lines_for_warehouses: defaultdict[
+            UUID, list[OrderFulfillmentLineInfo]
+        ] = defaultdict(list)
         for line, order_line in zip(lines, order_lines):
             for stock in line["stocks"]:
                 if stock["quantity"] > 0:
-                    warehouse_pk = cls.get_global_id_or_error(
-                        stock["warehouse"], only_type=Warehouse, field="warehouse"
+                    warehouse_pk = UUID(
+                        cls.get_global_id_or_error(
+                            stock["warehouse"], only_type=Warehouse, field="warehouse"
+                        )
                     )
                     lines_for_warehouses[warehouse_pk].append(
                         {"order_line": order_line, "quantity": stock["quantity"]}
@@ -231,22 +269,30 @@ class OrderFulfill(BaseMutation):
         return data
 
     @classmethod
-    def perform_mutation(cls, _root, info, order, **data):
-        order = cls.get_node_or_error(
+    def perform_mutation(  # type: ignore[override]
+        cls, _root, info: ResolveInfo, /, *, input, order: Optional[str] = None
+    ):
+        instance = cls.get_node_or_error(
             info,
             order,
             field="order",
             only_type=Order,
             qs=order_models.Order.objects.prefetch_related("lines__variant"),
         )
-        data = data.get("input")
+        if not instance:
+            # FIXME: order ID is optional but the code below will not work
+            # unless given a valid order ID
+            raise ValidationError(
+                "Order does not exist.", code=OrderErrorCode.NOT_FOUND.value
+            )
+        cls.check_channel_permissions(info, [instance.channel_id])
         site = get_site_promise(info.context).get()
-        cleaned_input = cls.clean_input(info, order, data, site=site)
+        cleaned_input = cls.clean_input(info, instance, input, site=site)
 
         context = info.context
         user = context.user
-        app = load_app(info.context)
-        manager = load_plugin_manager(info.context)
+        app = get_app_promise(info.context).get()
+        manager = get_plugin_manager_promise(info.context).get()
         lines_for_warehouses = cleaned_input["lines_for_warehouses"]
         notify_customer = cleaned_input.get("notify_customer", True)
         allow_stock_to_be_exceeded = cleaned_input.get(
@@ -258,7 +304,7 @@ class OrderFulfill(BaseMutation):
             fulfillments = create_fulfillments(
                 user,
                 app,
-                order,
+                instance,
                 dict(lines_for_warehouses),
                 manager,
                 site.settings,
@@ -271,4 +317,4 @@ class OrderFulfill(BaseMutation):
             errors = prepare_insufficient_stock_order_validation_errors(exc)
             raise ValidationError({"stocks": errors})
 
-        return OrderFulfill(fulfillments=fulfillments, order=order)
+        return OrderFulfill(fulfillments=fulfillments, order=instance)

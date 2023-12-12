@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import graphene
 import pytest
@@ -293,9 +293,14 @@ def test_collections_query_as_staff_without_channel(
 
 
 GET_FILTERED_PRODUCTS_COLLECTION_QUERY = """
-query CollectionProducts($id: ID!,$channel: String, $filters: ProductFilterInput) {
+query CollectionProducts(
+    $id: ID!,
+    $channel: String,
+    $filters: ProductFilterInput,
+    $where: ProductWhereInput,
+) {
   collection(id: $id, channel: $channel) {
-    products(first: 10, filter: $filters) {
+    products(first: 10, filter: $filters, where: $where) {
       edges {
         node {
           id
@@ -430,6 +435,38 @@ def test_filter_collection_products_by_multiple_attributes(
     ]
 
 
+def test_filter_where_collection_products(
+    user_api_client, product_list, published_collection, channel_USD, channel_PLN
+):
+    # given
+    query = GET_FILTERED_PRODUCTS_COLLECTION_QUERY
+
+    for product in product_list:
+        published_collection.products.add(product)
+
+    variables = {
+        "id": graphene.Node.to_global_id("Collection", published_collection.pk),
+        "channel": channel_USD.slug,
+        "where": {
+            "AND": [
+                {"slug": {"oneOf": ["test-product-a", "test-product-b"]}},
+                {"price": {"range": {"gte": 15}}},
+            ]
+        },
+    }
+
+    # when
+    response = user_api_client.post_graphql(query, variables)
+
+    # then
+    content = get_graphql_content(response)
+    products = content["data"]["collection"]["products"]["edges"]
+    assert len(products) == 1
+    assert products[0]["node"]["id"] == graphene.Node.to_global_id(
+        "Product", product_list[1].pk
+    )
+
+
 CREATE_COLLECTION_MUTATION = """
         mutation createCollection(
                 $name: String!, $slug: String,
@@ -488,6 +525,8 @@ def test_create_collection(
     permission_manage_products,
 ):
     # given
+    staff_api_client.user.user_permissions.add(permission_manage_products)
+
     product_ids = [to_global_id("Product", product.pk) for product in product_list]
     image_file, image_name = create_image()
     image_alt = "Alt text for an image."
@@ -512,9 +551,7 @@ def test_create_collection(
     )
 
     # when
-    response = staff_api_client.post_multipart(
-        body, permissions=[permission_manage_products]
-    )
+    response = staff_api_client.post_multipart(body)
     content = get_graphql_content(response)
     data = content["data"]["collectionCreate"]["collection"]
 
@@ -589,13 +626,13 @@ def test_create_collection_without_background_image(
 
 
 @pytest.mark.parametrize(
-    "input_slug, expected_slug",
-    (
+    ("input_slug", "expected_slug"),
+    [
         ("test-slug", "test-slug"),
         (None, "test-collection"),
         ("", "test-collection"),
         ("わたし-わ-にっぽん-です", "わたし-わ-にっぽん-です"),
-    ),
+    ],
 )
 def test_create_collection_with_given_slug(
     staff_api_client, permission_manage_products, input_slug, expected_slug, channel_USD
@@ -718,7 +755,7 @@ MUTATION_UPDATE_COLLECTION_WITH_BACKGROUND_IMAGE = """
         ) {
             collection {
                 slug
-                backgroundImage{
+                backgroundImage(size: 0) {
                     alt
                     url
                 }
@@ -741,6 +778,8 @@ def test_update_collection_with_background_image(
     site_settings,
 ):
     # given
+    staff_api_client.user.user_permissions.add(permission_manage_products)
+
     image_file, image_name = create_image()
     image_alt = "Alt text for an image."
 
@@ -769,9 +808,7 @@ def test_update_collection_with_background_image(
     )
 
     # when
-    response = staff_api_client.post_multipart(
-        body, permissions=[permission_manage_products]
-    )
+    response = staff_api_client.post_multipart(body)
 
     # then
     content = get_graphql_content(response)
@@ -790,7 +827,7 @@ def test_update_collection_with_background_image(
 
 
 @patch("saleor.core.tasks.delete_from_storage_task.delay")
-def test_update_collection_invalid_background_image(
+def test_update_collection_invalid_background_image_content_type(
     delete_from_storage_task_mock,
     staff_api_client,
     collection,
@@ -835,6 +872,60 @@ def test_update_collection_invalid_background_image(
     delete_from_storage_task_mock.assert_not_called()
 
 
+@patch("saleor.core.tasks.delete_from_storage_task.delay")
+def test_update_collection_invalid_background_image(
+    delete_from_storage_task_mock,
+    monkeypatch,
+    staff_api_client,
+    collection,
+    permission_manage_products,
+    media_root,
+):
+    # given
+    image_file, image_name = create_image()
+    image_alt = "Alt text for an image."
+
+    error_msg = "Test syntax error"
+    image_file_mock = Mock(side_effect=SyntaxError(error_msg))
+    monkeypatch.setattr(
+        "saleor.graphql.core.validators.file.Image.open", image_file_mock
+    )
+
+    size = 128
+    thumbnail_mock = MagicMock(spec=File)
+    thumbnail_mock.name = "thumbnail_image.jpg"
+    Thumbnail.objects.create(collection=collection, size=size, image=thumbnail_mock)
+
+    variables = {
+        "name": "new-name",
+        "slug": "new-slug",
+        "id": to_global_id("Collection", collection.id),
+        "backgroundImage": image_name,
+        "backgroundImageAlt": image_alt,
+    }
+    body = get_multipart_request_body(
+        MUTATION_UPDATE_COLLECTION_WITH_BACKGROUND_IMAGE,
+        variables,
+        image_file,
+        image_name,
+    )
+
+    # when
+    response = staff_api_client.post_multipart(
+        body, permissions=[permission_manage_products]
+    )
+
+    # then
+    content = get_graphql_content(response)
+    data = content["data"]["collectionUpdate"]
+    assert data["errors"][0]["field"] == "backgroundImage"
+    assert error_msg in data["errors"][0]["message"]
+
+    # ensure that thumbnails for old background image hasn't been deleted
+    assert Thumbnail.objects.filter(collection_id=collection.id)
+    delete_from_storage_task_mock.assert_not_called()
+
+
 UPDATE_COLLECTION_SLUG_MUTATION = """
     mutation($id: ID!, $slug: String) {
         collectionUpdate(
@@ -858,7 +949,7 @@ UPDATE_COLLECTION_SLUG_MUTATION = """
 
 
 @pytest.mark.parametrize(
-    "input_slug, expected_slug, error_message",
+    ("input_slug", "expected_slug", "error_message"),
     [
         ("test-slug", "test-slug", None),
         ("", "", "Slug value cannot be blank."),
@@ -923,7 +1014,7 @@ def test_update_collection_slug_exists(
 
 
 @pytest.mark.parametrize(
-    "input_slug, expected_slug, input_name, error_message, error_field",
+    ("input_slug", "expected_slug", "input_name", "error_message", "error_field"),
     [
         ("test-slug", "test-slug", "New name", None, None),
         ("", "", "New name", "Slug value cannot be blank.", "slug"),
@@ -1000,15 +1091,21 @@ DELETE_COLLECTION_MUTATION = """
 """
 
 
+@patch(
+    "saleor.product.tasks.update_products_discounted_prices_for_promotion_task.delay"
+)
 @patch("saleor.plugins.manager.PluginsManager.collection_deleted")
 def test_delete_collection(
     deleted_webhook_mock,
+    update_products_discounted_prices_for_promotion_task_mock,
     staff_api_client,
     collection,
+    product_list,
     permission_manage_products,
 ):
     # given
     query = DELETE_COLLECTION_MUTATION
+    collection.products.set(product_list)
     collection_id = to_global_id("Collection", collection.id)
     variables = {"id": collection_id}
 
@@ -1025,6 +1122,11 @@ def test_delete_collection(
         collection.refresh_from_db()
 
     deleted_webhook_mock.assert_called_once()
+    update_products_discounted_prices_for_promotion_task_mock.assert_called_once()
+    args = set(
+        update_products_discounted_prices_for_promotion_task_mock.call_args.args[0]
+    )
+    assert args == {product.id for product in product_list}
 
 
 @patch("saleor.core.tasks.delete_from_storage_task.delay")
@@ -1070,15 +1172,7 @@ def test_delete_collection_trigger_product_updated_webhook(
     product_list,
     permission_manage_products,
 ):
-    query = """
-        mutation deleteCollection($id: ID!) {
-            collectionDelete(id: $id) {
-                collection {
-                    name
-                }
-            }
-        }
-    """
+    query = DELETE_COLLECTION_MUTATION
     collection.products.add(*product_list)
     collection_id = to_global_id("Collection", collection.id)
     variables = {"id": collection_id}
@@ -1093,31 +1187,57 @@ def test_delete_collection_trigger_product_updated_webhook(
     assert len(product_list) == product_updated_mock.call_count
 
 
-def test_add_products_to_collection(
-    staff_api_client, collection, product_list, permission_manage_products
-):
-    query = """
-        mutation collectionAddProducts(
-            $id: ID!, $products: [ID!]!) {
-            collectionAddProducts(collectionId: $id, products: $products) {
-                collection {
-                    products {
-                        totalCount
-                    }
+COLLECTION_ADD_PRODUCTS_MUTATION = """
+    mutation collectionAddProducts(
+        $id: ID!, $products: [ID!]!) {
+        collectionAddProducts(collectionId: $id, products: $products) {
+            collection {
+                products {
+                    totalCount
                 }
             }
+            errors {
+                field
+                message
+                code
+            }
         }
-    """
+    }
+"""
+
+
+@patch(
+    "saleor.product.tasks.update_products_discounted_prices_for_promotion_task.delay"
+)
+def test_add_products_to_collection(
+    update_products_discounted_prices_for_promotion_task_mock,
+    staff_api_client,
+    collection,
+    product_list,
+    permission_manage_products,
+):
+    # given
+    query = COLLECTION_ADD_PRODUCTS_MUTATION
+
     collection_id = to_global_id("Collection", collection.id)
     product_ids = [to_global_id("Product", product.pk) for product in product_list]
     products_before = collection.products.count()
     variables = {"id": collection_id, "products": product_ids}
+
+    # when
     response = staff_api_client.post_graphql(
         query, variables, permissions=[permission_manage_products]
     )
+
+    # then
     content = get_graphql_content(response)
     data = content["data"]["collectionAddProducts"]["collection"]
     assert data["products"]["totalCount"] == products_before + len(product_ids)
+    update_products_discounted_prices_for_promotion_task_mock.assert_called_once()
+    args = set(
+        update_products_discounted_prices_for_promotion_task_mock.call_args.args[0]
+    )
+    assert args == {product.id for product in product_list}
 
 
 @patch("saleor.plugins.manager.PluginsManager.product_updated")
@@ -1128,18 +1248,7 @@ def test_add_products_to_collection_trigger_product_updated_webhook(
     product_list,
     permission_manage_products,
 ):
-    query = """
-        mutation collectionAddProducts(
-            $id: ID!, $products: [ID!]!) {
-            collectionAddProducts(collectionId: $id, products: $products) {
-                collection {
-                    products {
-                        totalCount
-                    }
-                }
-            }
-        }
-    """
+    query = COLLECTION_ADD_PRODUCTS_MUTATION
     collection_id = to_global_id("Collection", collection.id)
     product_ids = [to_global_id("Product", product.pk) for product in product_list]
     products_before = collection.products.count()
@@ -1153,26 +1262,26 @@ def test_add_products_to_collection_trigger_product_updated_webhook(
     assert len(product_list) == product_updated_mock.call_count
 
 
+def test_add_products_to_collection_on_sale_trigger_discounted_price_recalculation(
+    staff_api_client, collection, product_list, permission_manage_products
+):
+    query = COLLECTION_ADD_PRODUCTS_MUTATION
+    collection_id = to_global_id("Collection", collection.id)
+    product_ids = [to_global_id("Product", product.pk) for product in product_list]
+    products_before = collection.products.count()
+    variables = {"id": collection_id, "products": product_ids}
+    response = staff_api_client.post_graphql(
+        query, variables, permissions=[permission_manage_products]
+    )
+    content = get_graphql_content(response)
+    data = content["data"]["collectionAddProducts"]["collection"]
+    assert data["products"]["totalCount"] == products_before + len(product_ids)
+
+
 def test_add_products_to_collection_with_product_without_variants(
     staff_api_client, collection, product_list, permission_manage_products
 ):
-    query = """
-        mutation collectionAddProducts(
-            $id: ID!, $products: [ID!]!) {
-            collectionAddProducts(collectionId: $id, products: $products) {
-                collection {
-                    products {
-                        totalCount
-                    }
-                }
-                errors {
-                    field
-                    message
-                    code
-                }
-            }
-        }
-    """
+    query = COLLECTION_ADD_PRODUCTS_MUTATION
     product_list[0].variants.all().delete()
     collection_id = to_global_id("Collection", collection.id)
     product_ids = [to_global_id("Product", product.pk) for product in product_list]
@@ -1189,32 +1298,52 @@ def test_add_products_to_collection_with_product_without_variants(
     assert error["message"] == "Cannot manage products without variants."
 
 
-def test_remove_products_from_collection(
-    staff_api_client, collection, product_list, permission_manage_products
-):
-    query = """
-        mutation collectionRemoveProducts(
-            $id: ID!, $products: [ID!]!) {
-            collectionRemoveProducts(collectionId: $id, products: $products) {
-                collection {
-                    products {
-                        totalCount
-                    }
+COLLECTION_REMOVE_PRODUCTS_MUTATION = """
+    mutation collectionRemoveProducts(
+        $id: ID!, $products: [ID!]!) {
+        collectionRemoveProducts(collectionId: $id, products: $products) {
+            collection {
+                products {
+                    totalCount
                 }
             }
         }
-    """
+    }
+"""
+
+
+@patch(
+    "saleor.product.tasks.update_products_discounted_prices_for_promotion_task.delay"
+)
+def test_remove_products_from_collection(
+    update_products_discounted_prices_for_promotion_task_mock,
+    staff_api_client,
+    collection,
+    product_list,
+    permission_manage_products,
+):
+    # given
+    query = COLLECTION_REMOVE_PRODUCTS_MUTATION
     collection.products.add(*product_list)
     collection_id = to_global_id("Collection", collection.id)
     product_ids = [to_global_id("Product", product.pk) for product in product_list]
     products_before = collection.products.count()
     variables = {"id": collection_id, "products": product_ids}
+
+    # when
     response = staff_api_client.post_graphql(
         query, variables, permissions=[permission_manage_products]
     )
+
+    # then
     content = get_graphql_content(response)
     data = content["data"]["collectionRemoveProducts"]["collection"]
     assert data["products"]["totalCount"] == products_before - len(product_ids)
+    update_products_discounted_prices_for_promotion_task_mock.assert_called_once()
+    args = set(
+        update_products_discounted_prices_for_promotion_task_mock.call_args.args[0]
+    )
+    assert args == {product.id for product in product_list}
 
 
 @patch("saleor.plugins.manager.PluginsManager.product_updated")
@@ -1225,18 +1354,7 @@ def test_remove_products_from_collection_trigger_product_updated_webhook(
     product_list,
     permission_manage_products,
 ):
-    query = """
-        mutation collectionRemoveProducts(
-            $id: ID!, $products: [ID!]!) {
-            collectionRemoveProducts(collectionId: $id, products: $products) {
-                collection {
-                    products {
-                        totalCount
-                    }
-                }
-            }
-        }
-    """
+    query = COLLECTION_REMOVE_PRODUCTS_MUTATION
     collection.products.add(*product_list)
     collection_id = to_global_id("Collection", collection.id)
     product_ids = [to_global_id("Product", product.pk) for product in product_list]
@@ -1405,7 +1523,7 @@ def test_collection_image_query_with_size_thumbnail_url_returned(
     )
 
 
-def test_collection_image_query_only_format_provided_original_image_returned(
+def test_collection_image_query_zero_size_custom_format_provided(
     user_api_client, published_collection, media_root, channel_USD, site_settings
 ):
     # given
@@ -1424,6 +1542,7 @@ def test_collection_image_query_only_format_provided_original_image_returned(
         "id": collection_id,
         "channel": channel_USD.slug,
         "format": format,
+        "size": 0,
     }
 
     # when
@@ -1441,7 +1560,7 @@ def test_collection_image_query_only_format_provided_original_image_returned(
     assert data["backgroundImage"]["url"] == expected_url
 
 
-def test_collection_image_query_no_size_value_original_image_returned(
+def test_collection_image_query_zero_size_value_original_image_returned(
     user_api_client, published_collection, media_root, channel_USD, site_settings
 ):
     # given
@@ -1457,6 +1576,7 @@ def test_collection_image_query_no_size_value_original_image_returned(
     variables = {
         "id": collection_id,
         "channel": channel_USD.slug,
+        "size": 0,
     }
 
     # when
@@ -1503,7 +1623,10 @@ def test_collection_query_invalid_id(
     response = user_api_client.post_graphql(FETCH_COLLECTION_QUERY, variables)
     content = get_graphql_content_from_response(response)
     assert len(content["errors"]) == 1
-    assert content["errors"][0]["message"] == f"Couldn't resolve id: {collection_id}."
+    assert (
+        content["errors"][0]["message"]
+        == f"Invalid ID: {collection_id}. Expected: Collection."
+    )
     assert content["data"]["collection"] is None
 
 
@@ -1715,7 +1838,7 @@ def test_query_collection_for_federation(api_client, published_collection, chann
 
 
 @pytest.mark.parametrize(
-    "collection_filter, count",
+    ("collection_filter", "count"),
     [
         ({"published": "PUBLISHED"}, 2),
         ({"published": "HIDDEN"}, 1),
@@ -1800,7 +1923,7 @@ QUERY_COLLECTIONS_WITH_SORT = """
 
 
 @pytest.mark.parametrize(
-    "collection_sort, result_order",
+    ("collection_sort", "result_order"),
     [
         ({"field": "NAME", "direction": "ASC"}, ["Coll1", "Coll2", "Coll3"]),
         ({"field": "NAME", "direction": "DESC"}, ["Coll3", "Coll2", "Coll1"]),
@@ -1868,8 +1991,6 @@ QUERY_PAGINATED_SORTED_COLLECTIONS = """
 def test_pagination_for_sorting_collections_by_published_at_date(
     api_client, channel_USD
 ):
-    """Ensure that using the cursor in sorting collections by published at date works
-    properly."""
     # given
     collections = Collection.objects.bulk_create(
         [
@@ -1923,3 +2044,32 @@ def test_pagination_for_sorting_collections_by_published_at_date(
     assert [node["node"]["slug"] for node in data["edges"]] == [
         collection.slug for collection in collections[first:]
     ]
+
+
+def test_collections_query_return_error_with_sort_by_rank_without_search(
+    staff_api_client, published_collection, product_list, channel_USD
+):
+    # given
+    for product in product_list:
+        published_collection.products.add(product)
+
+    variables = {
+        "id": graphene.Node.to_global_id("Collection", published_collection.pk),
+        "sortBy": {"direction": "DESC", "field": "RANK"},
+        "channel": channel_USD.slug,
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        GET_SORTED_PRODUCTS_COLLECTION_QUERY, variables
+    )
+    content = get_graphql_content(response, ignore_errors=True)
+
+    # then
+    errors = content["errors"]
+    expected_message = (
+        "Sorting by RANK is available only when using a search filter "
+        "or search argument."
+    )
+    assert len(errors) == 1
+    assert errors[0]["message"] == expected_message

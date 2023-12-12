@@ -1,29 +1,37 @@
+from django.db.models import Exists, OuterRef, Q
+
+from ...app.models import App
 from ...checkout.fetch import (
     fetch_checkout_info,
     fetch_checkout_lines,
     get_all_shipping_methods_list,
 )
 from ...core.exceptions import PermissionDenied
-from ...core.permissions import AppPermission
-from ...core.tracing import traced_resolver
+from ...permission.enums import AppPermission
 from ...webhook import models, payloads
 from ...webhook.deprecated_event_types import WebhookEventType
 from ...webhook.event_types import WebhookEventAsyncType, WebhookEventSyncType
-from ..app.dataloaders import load_app
+from ..core import ResolveInfo
+from ..core.context import get_database_connection_name
+from ..core.tracing import traced_resolver
 from ..core.utils import from_global_id_or_error
-from ..discount.dataloaders import load_discounts
-from ..plugins.dataloaders import load_plugin_manager
 from .types import Webhook, WebhookEvent
 
 
-def resolve_webhook(info, id):
-    app = load_app(info.context)
+def resolve_webhook(info: ResolveInfo, id, app):
     _, id = from_global_id_or_error(id, Webhook)
     if app:
         return app.webhooks.filter(id=id).first()
     user = info.context.user
-    if user.has_perm(AppPermission.MANAGE_APPS):
-        return models.Webhook.objects.filter(pk=id).first()
+    if user and user.has_perm(AppPermission.MANAGE_APPS):
+        apps = (
+            App.objects.using(get_database_connection_name(info.context))
+            .filter(removed_at__isnull=True)
+            .values("pk")
+        )
+        return models.Webhook.objects.filter(
+            Q(pk=id), Exists(apps.filter(id=OuterRef("app_id")))
+        ).first()
     raise PermissionDenied(permissions=[AppPermission.MANAGE_APPS])
 
 
@@ -35,29 +43,27 @@ def resolve_webhook_events():
 
 
 @traced_resolver
-def resolve_sample_payload(info, event_name):
-    app = load_app(info.context)
+def resolve_sample_payload(info: ResolveInfo, event_name, app):
     user = info.context.user
     required_permission = WebhookEventAsyncType.PERMISSIONS.get(
         event_name, WebhookEventSyncType.PERMISSIONS.get(event_name)
     )
-    if required_permission:
+    if not required_permission:
+        return payloads.generate_sample_payload(event_name)
+    else:
         if app and app.has_perm(required_permission):
             return payloads.generate_sample_payload(event_name)
         if user and user.has_perm(required_permission):
             return payloads.generate_sample_payload(event_name)
-    raise PermissionDenied(permissions=[required_permission])
+        raise PermissionDenied(permissions=[required_permission])
 
 
-def resolve_shipping_methods_for_checkout(info, checkout):
-    manager = load_plugin_manager(info.context)
-    discounts = load_discounts(info.context)
+def resolve_shipping_methods_for_checkout(info: ResolveInfo, checkout, manager):
     lines, _ = fetch_checkout_lines(checkout)
     shipping_channel_listings = checkout.channel.shipping_method_listings.all()
     checkout_info = fetch_checkout_info(
         checkout,
         lines,
-        discounts,
         manager,
         shipping_channel_listings,
         fetch_delivery_methods=False,
@@ -66,7 +72,6 @@ def resolve_shipping_methods_for_checkout(info, checkout):
         checkout_info,
         checkout.shipping_address,
         lines,
-        discounts,
         shipping_channel_listings,
         manager,
     )

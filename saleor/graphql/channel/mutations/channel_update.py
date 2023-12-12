@@ -3,20 +3,39 @@ from django.core.exceptions import ValidationError
 from django.utils.text import slugify
 
 from ....channel import models
-from ....core.permissions import ChannelPermissions
+from ....channel.error_codes import ChannelErrorCode
 from ....core.tracing import traced_atomic_transaction
+from ....discount.tasks import (
+    decrease_voucher_code_usage_of_draft_orders,
+    disconnect_voucher_codes_from_draft_orders,
+)
+from ....permission.enums import (
+    ChannelPermissions,
+    CheckoutPermissions,
+    OrderPermissions,
+    PaymentPermissions,
+)
 from ....shipping.tasks import (
     drop_invalid_shipping_methods_relations_for_given_channels,
 )
+from ....webhook.event_types import WebhookEventAsyncType
 from ...account.enums import CountryCodeEnum
-from ...core.descriptions import ADDED_IN_31, ADDED_IN_35, PREVIEW_FEATURE
+from ...core import ResolveInfo
+from ...core.descriptions import ADDED_IN_31, ADDED_IN_35
+from ...core.doc_category import DOC_CATEGORY_CHANNELS
 from ...core.mutations import ModelMutation
-from ...core.types import ChannelError, ChannelErrorCode, NonNullList
-from ...plugins.dataloaders import load_plugin_manager
+from ...core.types import ChannelError, NonNullList
+from ...core.utils import WebhookEventInfo
+from ...plugins.dataloaders import get_plugin_manager_promise
 from ...utils.validators import check_for_duplicates
 from ..types import Channel
 from ..utils import delete_invalid_warehouse_to_shipping_zone_relations
 from .channel_create import ChannelInput
+from .utils import (
+    clean_input_checkout_settings,
+    clean_input_order_settings,
+    clean_input_payment_settings,
+)
 
 
 class ChannelUpdateInput(ChannelInput):
@@ -36,11 +55,12 @@ class ChannelUpdateInput(ChannelInput):
     )
     remove_warehouses = NonNullList(
         graphene.ID,
-        description="List of warehouses to unassign from the channel."
-        + ADDED_IN_35
-        + PREVIEW_FEATURE,
+        description="List of warehouses to unassign from the channel." + ADDED_IN_35,
         required=False,
     )
+
+    class Meta:
+        doc_category = DOC_CATEGORY_CHANNELS
 
 
 class ChannelUpdate(ModelMutation):
@@ -51,15 +71,41 @@ class ChannelUpdate(ModelMutation):
         )
 
     class Meta:
-        description = "Update a channel."
+        description = (
+            "Update a channel.\n\n"
+            "Requires one of the following permissions: MANAGE_CHANNELS.\n"
+            "Requires one of the following permissions "
+            "when updating only `orderSettings` field: "
+            "`MANAGE_CHANNELS`, `MANAGE_ORDERS`.\n"
+            "Requires one of the following permissions "
+            "when updating only `checkoutSettings` field: "
+            "`MANAGE_CHANNELS`, `MANAGE_CHECKOUTS`.\n"
+            "Requires one of the following permissions "
+            "when updating only `paymentSettings` field: "
+            "`MANAGE_CHANNELS`, `HANDLE_PAYMENTS`."
+        )
+        auto_permission_message = False
         model = models.Channel
         object_type = Channel
-        permissions = (ChannelPermissions.MANAGE_CHANNELS,)
         error_type_class = ChannelError
         error_type_field = "channel_errors"
+        webhook_events_info = [
+            WebhookEventInfo(
+                type=WebhookEventAsyncType.CHANNEL_UPDATED,
+                description="A channel was updated.",
+            ),
+            WebhookEventInfo(
+                type=WebhookEventAsyncType.CHANNEL_METADATA_UPDATED,
+                description=(
+                    "Optionally triggered when public or private metadata is updated."
+                ),
+            ),
+        ]
+        support_meta_field = True
+        support_private_meta_field = True
 
     @classmethod
-    def clean_input(cls, info, instance, data, input_cls=None):
+    def clean_input(cls, info: ResolveInfo, instance, data, **kwargs):
         errors = {}
         if error := check_for_duplicates(
             data, "add_shipping_zones", "remove_shipping_zones", "shipping_zones"
@@ -76,17 +122,58 @@ class ChannelUpdate(ModelMutation):
         if errors:
             raise ValidationError(errors)
 
-        cleaned_input = super().clean_input(info, instance, data)
+        cleaned_input = super().clean_input(info, instance, data, **kwargs)
         slug = cleaned_input.get("slug")
         if slug:
             cleaned_input["slug"] = slugify(slug)
         if stock_settings := cleaned_input.get("stock_settings"):
             cleaned_input["allocation_strategy"] = stock_settings["allocation_strategy"]
+        if order_settings := cleaned_input.get("order_settings"):
+            clean_input_order_settings(order_settings, cleaned_input, instance)
+
+        if checkout_settings := cleaned_input.get("checkout_settings"):
+            clean_input_checkout_settings(checkout_settings, cleaned_input)
+
+        if payment_settings := cleaned_input.get("payment_settings"):
+            clean_input_payment_settings(payment_settings, cleaned_input)
 
         return cleaned_input
 
     @classmethod
-    def _save_m2m(cls, info, instance, cleaned_data):
+    def check_permissions(cls, context, permissions=None, **data):
+        permissions = [ChannelPermissions.MANAGE_CHANNELS]
+        has_permission = super().check_permissions(
+            context, permissions, require_all_permissions=False, **data
+        )
+        if has_permission:
+            return has_permission
+
+        # Validate if user/app has enough permissions to update the specific settings.
+        input = data["data"]["input"]
+
+        settings_per_permission_map = {
+            "order_settings": OrderPermissions.MANAGE_ORDERS,
+            "checkout_settings": CheckoutPermissions.MANAGE_CHECKOUTS,
+            "payment_settings": PaymentPermissions.HANDLE_PAYMENTS,
+        }
+
+        if set(input.keys()).difference(settings_per_permission_map.keys()):
+            # user/app doesn't have MANAGE_CHANNELS and input contains not only
+            # settings fields.
+            return False
+
+        permissions = []
+        for key in input.keys():
+            permissions.append(settings_per_permission_map[key])
+
+        if not permissions:
+            return False
+        return super().check_permissions(
+            context, permissions, require_all_permissions=True, **data
+        )
+
+    @classmethod
+    def _save_m2m(cls, info: ResolveInfo, instance, cleaned_data):
         with traced_atomic_transaction():
             super()._save_m2m(info, instance, cleaned_data)
             cls._update_shipping_zones(instance, cleaned_data)
@@ -136,6 +223,25 @@ class ChannelUpdate(ModelMutation):
             instance.warehouses.remove(*remove_warehouses)
 
     @classmethod
-    def post_save_action(cls, info, instance, cleaned_input):
-        manager = load_plugin_manager(info.context)
+    def _update_voucher_usage(cls, cleaned_input, instance):
+        """Update voucher code usage.
+
+        When the 'include_draft_order_in_voucher_usage' flag is changed:
+        - True -> False: decrease voucher usage of all vouchers associated with
+        draft orders.
+        - False -> True: disconnect vouchers from all draft orders.
+        """
+        current_flag = cleaned_input.get("include_draft_order_in_voucher_usage")
+        previous_flag = cleaned_input.get("prev_include_draft_order_in_voucher_usage")
+        if current_flag is False and previous_flag is True:
+            decrease_voucher_code_usage_of_draft_orders(instance.id)
+        elif current_flag is True and previous_flag is False:
+            disconnect_voucher_codes_from_draft_orders(instance.id)
+
+    @classmethod
+    def post_save_action(cls, info: ResolveInfo, instance, cleaned_input):
+        manager = get_plugin_manager_promise(info.context).get()
         cls.call_event(manager.channel_updated, instance)
+        if cleaned_input.get("metadata"):
+            cls.call_event(manager.channel_metadata_updated, instance)
+        cls._update_voucher_usage(cleaned_input, instance)

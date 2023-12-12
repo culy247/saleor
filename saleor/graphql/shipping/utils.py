@@ -1,4 +1,5 @@
-from typing import Iterable, List, Optional
+from collections.abc import Iterable
+from typing import Optional, overload
 
 from django.core.exceptions import ValidationError
 
@@ -6,9 +7,19 @@ from ...shipping.models import ShippingMethod
 from ..core.utils import from_global_id_or_error
 
 
+@overload
+def get_shipping_model_by_object_id(object_id: str, raise_error=True) -> ShippingMethod:
+    ...
+
+
+@overload
 def get_shipping_model_by_object_id(
-    object_id: Optional[str], raise_error: bool = True
+    object_id: Optional[str], raise_error=False
 ) -> Optional[ShippingMethod]:
+    ...
+
+
+def get_shipping_model_by_object_id(object_id, raise_error=True):
     if object_id:
         _, object_pk = from_global_id_or_error(object_id)
         shipping_method = ShippingMethod.objects.filter(pk=object_pk).first()
@@ -24,7 +35,7 @@ def get_shipping_model_by_object_id(
     return None
 
 
-def get_instances_by_object_ids(object_ids: List[str]) -> Iterable[ShippingMethod]:
+def get_instances_by_object_ids(object_ids: list[str]) -> Iterable[ShippingMethod]:
     model_ids = []
     for object_id in object_ids:
         _, object_pk = from_global_id_or_error(object_id)

@@ -118,7 +118,7 @@ def test_create_payment(checkout_with_item, address):
 
     manager = get_plugins_manager()
     lines, _ = fetch_checkout_lines(checkout_with_item)
-    checkout_info = fetch_checkout_info(checkout_with_item, lines, [], manager)
+    checkout_info = fetch_checkout_info(checkout_with_item, lines, manager)
     total = checkout_total(
         manager=manager, checkout_info=checkout_info, lines=lines, address=address
     )
@@ -159,7 +159,7 @@ def test_create_payment_from_checkout_requires_billing_address(checkout_with_ite
 
     manager = get_plugins_manager()
     lines, _ = fetch_checkout_lines(checkout_with_item)
-    checkout_info = fetch_checkout_info(checkout_with_item, lines, [], manager)
+    checkout_info = fetch_checkout_info(checkout_with_item, lines, manager)
     total = checkout_total(
         manager=manager, checkout_info=checkout_info, lines=lines, address=None
     )
@@ -201,7 +201,7 @@ def test_create_payment_information_for_checkout_payment(address, checkout_with_
 
     manager = get_plugins_manager()
     lines, _ = fetch_checkout_lines(checkout_with_item)
-    checkout_info = fetch_checkout_info(checkout_with_item, lines, [], manager)
+    checkout_info = fetch_checkout_info(checkout_with_item, lines, manager)
     total = checkout_total(
         manager=manager, checkout_info=checkout_info, lines=lines, address=address
     )
@@ -262,8 +262,8 @@ def test_create_payment_information_for_empty_payment(payment_dummy):
 
 def test_create_payment_information_for_checkout_metadata(payment_dummy, checkout):
     metadata = {"test_key": "test_val"}
-    checkout.metadata = metadata
-    checkout.save(update_fields=["metadata"])
+    checkout.metadata_storage.metadata = metadata
+    checkout.metadata_storage.save(update_fields=["metadata"])
     payment_dummy.order = None
     payment_dummy.checkout = checkout
     payment_dummy.save(update_fields=["order", "checkout"])
@@ -337,7 +337,7 @@ def test_create_payment_information_store(checkout_with_item, address, store):
 
     manager = get_plugins_manager()
     lines, _ = fetch_checkout_lines(checkout_with_item)
-    checkout_info = fetch_checkout_info(checkout_with_item, lines, [], manager)
+    checkout_info = fetch_checkout_info(checkout_with_item, lines, manager)
     total = checkout_total(
         manager=manager, checkout_info=checkout_info, lines=lines, address=address
     )
@@ -372,7 +372,7 @@ def test_create_payment_information_metadata(checkout_with_item, address, metada
 
     manager = get_plugins_manager()
     lines, _ = fetch_checkout_lines(checkout_with_item)
-    checkout_info = fetch_checkout_info(checkout_with_item, lines, [], manager)
+    checkout_info = fetch_checkout_info(checkout_with_item, lines, manager)
     total = checkout_total(
         manager=manager, checkout_info=checkout_info, lines=lines, address=address
     )
@@ -663,12 +663,12 @@ def test_validate_gateway_response_incorrect_transaction_kind(gateway_response):
         validate_gateway_response(gateway_response)
 
     assert str(e.value) == (
-        "Gateway response kind must be one of {}".format(sorted(ALLOWED_GATEWAY_KINDS))
+        f"Gateway response kind must be one of {sorted(ALLOWED_GATEWAY_KINDS)}"
     )
 
 
 def test_validate_gateway_response_not_json_serializable(gateway_response):
-    class CustomClass(object):
+    class CustomClass:
         pass
 
     gateway_response.raw_response = CustomClass()
@@ -680,7 +680,7 @@ def test_validate_gateway_response_not_json_serializable(gateway_response):
 
 
 @pytest.mark.parametrize(
-    "currency, exp_response",
+    ("currency", "exp_response"),
     [("EUR", True), ("USD", True), ("PLN", False)],
 )
 def test_is_currency_supported(

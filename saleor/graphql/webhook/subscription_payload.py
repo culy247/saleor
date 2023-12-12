@@ -1,77 +1,28 @@
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from celery.utils.log import get_task_logger
 from django.conf import settings
-from django.core.exceptions import ValidationError
-from django.http import HttpRequest
 from django.utils import timezone
 from django.utils.functional import SimpleLazyObject
-from graphql import GraphQLDocument, get_default_backend, parse
-from graphql.error import GraphQLError, GraphQLSyntaxError
-from graphql.language.ast import FragmentDefinition, OperationDefinition
+from graphql import get_default_backend, parse
+from graphql.error import GraphQLError
 from promise import Promise
 
 from ...app.models import App
 from ...core.exceptions import PermissionDenied
-from ...plugins.manager import PluginsManager
-from ...settings import get_host
-from ...webhook.error_codes import WebhookErrorCode
+from ...core.utils import get_domain
+from ..core import SaleorContext
 from ..utils import format_error
 
 logger = get_task_logger(__name__)
 
 
-def validate_subscription_query(query: str) -> bool:
-    from ..api import schema
-
-    graphql_backend = get_default_backend()
-    try:
-        document = graphql_backend.document_from_string(schema, query)
-    except (ValueError, GraphQLSyntaxError):
-        return False
-    if not check_document_is_single_subscription(document):
-        return False
-    return True
-
-
-def validate_query(query):
-    if not query:
-        return
-    is_valid = validate_subscription_query(query)
-    if not is_valid:
-        raise ValidationError(
-            {
-                "query": ValidationError(
-                    "Subscription query is not valid",
-                    code=WebhookErrorCode.INVALID.value,
-                )
-            }
-        )
-
-
-def check_document_is_single_subscription(document: GraphQLDocument) -> bool:
-    """Check if document contains only a single subscription definition.
-
-    Only fragments and single subscription definition are allowed.
-    """
-    subscriptions = []
-    for definition in document.document_ast.definitions:
-        if isinstance(definition, FragmentDefinition):
-            pass
-        elif isinstance(definition, OperationDefinition):
-            if definition.operation == "subscription":
-                if len(definition.selection_set.selections) != 1:
-                    return False
-                subscriptions.append(definition)
-
-            else:
-                return False
-        else:
-            return False
-    return len(subscriptions) == 1
-
-
-def initialize_request(requestor=None, sync_event=False) -> HttpRequest:
+def initialize_request(
+    requestor=None,
+    sync_event=False,
+    allow_replica=False,
+    event_type: Optional[str] = None,
+) -> SaleorContext:
     """Prepare a request object for webhook subscription.
 
     It creates a dummy request object.
@@ -79,23 +30,21 @@ def initialize_request(requestor=None, sync_event=False) -> HttpRequest:
     return: HttpRequest
     """
 
-    def _get_plugins(requestor_getter):
-        return PluginsManager(settings.PLUGINS, requestor_getter)
-
     request_time = timezone.now()
-
-    request = HttpRequest()
+    request = SaleorContext()
     request.path = "/graphql/"
     request.path_info = "/graphql/"
     request.method = "GET"
-    request.META = {"SERVER_NAME": SimpleLazyObject(get_host), "SERVER_PORT": "80"}
+    request.META = {"SERVER_NAME": SimpleLazyObject(get_domain), "SERVER_PORT": "80"}
     if settings.ENABLE_SSL:
         request.META["HTTP_X_FORWARDED_PROTO"] = "https"
         request.META["SERVER_PORT"] = "443"
 
-    request.sync_event = sync_event  # type: ignore
-    request.requestor = requestor  # type: ignore
-    request.request_time = request_time  # type: ignore
+    setattr(request, "sync_event", sync_event)
+    setattr(request, "event_type", event_type)
+    request.requestor = requestor
+    request.request_time = request_time
+    request.allow_replica = allow_replica
 
     return request
 
@@ -112,9 +61,9 @@ def generate_payload_from_subscription(
     event_type: str,
     subscribable_object,
     subscription_query: Optional[str],
-    request: HttpRequest,
+    request: SaleorContext,
     app: Optional[App] = None,
-) -> Optional[Dict[str, Any]]:
+) -> Optional[dict[str, Any]]:
     """Generate webhook payload from subscription query.
 
     It uses a graphql's engine to build payload by using the same logic as response.
@@ -141,9 +90,7 @@ def generate_payload_from_subscription(
         ast,
     )
     app_id = app.pk if app else None
-
-    request.app = app  # type: ignore
-
+    request.app = app
     results = document.execute(
         allow_subscriptions=True,
         root=(event_type, subscribable_object),
@@ -157,7 +104,7 @@ def generate_payload_from_subscription(
         )
         return None
 
-    payload = []  # type: ignore
+    payload: list[Any] = []
     results.subscribe(payload.append)
 
     if not payload:

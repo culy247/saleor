@@ -104,7 +104,7 @@ def test_checkout_lines_update(
 
     manager = get_plugins_manager()
     lines, _ = fetch_checkout_lines(checkout)
-    checkout_info = fetch_checkout_info(checkout, lines, [], manager)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
     mocked_update_shipping_method.assert_called_once_with(checkout_info, lines)
     assert checkout.last_change != previous_last_change
     assert mocked_invalidate_checkout_prices.call_count == 1
@@ -148,7 +148,7 @@ def test_checkout_lines_update_using_line_id(
 
     manager = get_plugins_manager()
     lines, _ = fetch_checkout_lines(checkout)
-    checkout_info = fetch_checkout_info(checkout, lines, [], manager)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
     mocked_update_shipping_method.assert_called_once_with(checkout_info, lines)
     assert checkout.last_change != previous_last_change
 
@@ -195,7 +195,7 @@ def test_checkout_lines_update_using_line_id_and_variant_id(
 
     manager = get_plugins_manager()
     lines, _ = fetch_checkout_lines(checkout)
-    checkout_info = fetch_checkout_info(checkout, lines, [], manager)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
     mocked_update_shipping_method.assert_called_once_with(checkout_info, lines)
     assert checkout.last_change != previous_last_change
 
@@ -267,8 +267,7 @@ def test_checkout_lines_update_block_when_variant_id_and_line_id_provided(
 def test_checkout_lines_update_only_stock_in_cc_warehouse(
     mocked_update_shipping_method, user_api_client, checkout_with_item, warehouse_for_cc
 ):
-    """Ensure the insufficient error is not raised when the only available quantity
-    is in a stock from the collection point warehouse without shipping zone assigned."""
+    """Test that click-and-collect quantities are available if no shipping method is set."""
     # given
     checkout = checkout_with_item
     lines, _ = fetch_checkout_lines(checkout)
@@ -310,18 +309,15 @@ def test_checkout_lines_update_only_stock_in_cc_warehouse(
 
     manager = get_plugins_manager()
     lines, _ = fetch_checkout_lines(checkout)
-    checkout_info = fetch_checkout_info(checkout, lines, [], manager)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
     mocked_update_shipping_method.assert_called_once_with(checkout_info, lines)
     assert checkout.last_change != previous_last_change
 
 
 def test_checkout_lines_update_only_stock_in_cc_warehouse_delivery_method_set(
     user_api_client, checkout_with_item, warehouse_for_cc, shipping_method
-):
-    """Ensure the insufficient error is raised when the only available quantity is in
-    a stock from the collection point warehouse without shipping zone assigned
-    and the checkout has shipping method set."""
-    # given
+):  # given
+    """Test that click-and-collect quantities are unavailable if a non-C&C shipping method is set."""
     checkout = checkout_with_item
     line = checkout.lines.first()
     variant = line.variant
@@ -357,17 +353,13 @@ def test_checkout_lines_update_only_stock_in_cc_warehouse_delivery_method_set(
 def test_checkout_lines_update_checkout_with_voucher(
     user_api_client, checkout_with_item, voucher_percentage
 ):
-    """Ensure that discount is correct calculated when updating the checkout with
-    already applied discount."""
     # given
     channel = checkout_with_item.channel
     line = checkout_with_item.lines.first()
     variant = line.variant
 
     channel_listing = variant.channel_listings.get(channel=channel)
-    unit_price = variant.get_price(
-        variant.product, [], checkout_with_item.channel, channel_listing
-    )
+    unit_price = variant.get_price(channel_listing)
 
     voucher_channel_listing = voucher_percentage.channel_listings.get(channel=channel)
     voucher_channel_listing.discount_value = 100
@@ -509,7 +501,7 @@ def test_checkout_lines_update_other_lines_reservations_expirations(
     checkout = checkout_line_with_one_reservation.checkout
     line = checkout_line_with_one_reservation
     reservation = line.reservations.get()
-    checkout_info = fetch_checkout_info(checkout, [], [], get_plugins_manager())
+    checkout_info = fetch_checkout_info(checkout, [], get_plugins_manager())
     lines, _ = fetch_checkout_lines(checkout)
     assert calculate_checkout_quantity(lines) == 2
 
@@ -707,9 +699,6 @@ def test_checkout_lines_update_clear_custom_price(
 def test_checkout_lines_update_set_quantity_to_0_then_update_customer_price(
     app_api_client, checkout_with_item, permission_handle_checkouts
 ):
-    """Ensure an error is not raised and the line is deleted when the line quantity
-    is set to 0 firstly and then the custom price is changed."""
-
     checkout = checkout_with_item
     lines, _ = fetch_checkout_lines(checkout)
     assert checkout.lines.count() == 1
@@ -949,7 +938,7 @@ def test_checkout_line_delete_by_zero_quantity(
     assert checkout.lines.count() == 0
     manager = get_plugins_manager()
     lines, _ = fetch_checkout_lines(checkout)
-    checkout_info = fetch_checkout_info(checkout, lines, [], manager)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
     mocked_update_shipping_method.assert_called_once_with(checkout_info, lines)
     assert checkout.last_change != previous_last_change
 
@@ -985,7 +974,7 @@ def test_checkout_line_delete_by_zero_quantity_when_variant_unavailable_for_purc
     assert checkout.lines.count() == 0
     manager = get_plugins_manager()
     lines, _ = fetch_checkout_lines(checkout)
-    checkout_info = fetch_checkout_info(checkout, lines, [], manager)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
     mocked_update_shipping_method.assert_called_once_with(checkout_info, lines)
 
 
@@ -1021,7 +1010,7 @@ def test_checkout_line_update_by_zero_quantity_dont_create_new_lines(
     assert checkout.lines.count() == 0
     manager = get_plugins_manager()
     lines, _ = fetch_checkout_lines(checkout)
-    checkout_info = fetch_checkout_info(checkout, lines, [], manager)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
     mocked_update_shipping_method.assert_called_once_with(checkout_info, lines)
     assert checkout.last_change != previous_last_change
 
@@ -1112,7 +1101,7 @@ def test_checkout_lines_update_remove_shipping_if_removed_product_with_shipping(
     checkout.shipping_address = address
     checkout.shipping_method = shipping_method
     checkout.save()
-    checkout_info = fetch_checkout_info(checkout, [], [], get_plugins_manager())
+    checkout_info = fetch_checkout_info(checkout, [], get_plugins_manager())
     add_variant_to_checkout(checkout_info, digital_variant, 1)
     line = checkout.lines.first()
     variant = line.variant
@@ -1131,3 +1120,34 @@ def test_checkout_lines_update_remove_shipping_if_removed_product_with_shipping(
     checkout.refresh_from_db()
     assert checkout.lines.count() == 1
     assert not checkout.shipping_method
+
+
+def test_with_active_problems_flow(
+    api_client, checkout_with_problems, product_with_single_variant
+):
+    # given
+    channel = checkout_with_problems.channel
+    channel.use_legacy_error_flow_for_checkout = False
+    channel.save(update_fields=["use_legacy_error_flow_for_checkout"])
+
+    variant = product_with_single_variant.variants.first()
+
+    checkout_info = fetch_checkout_info(
+        checkout_with_problems, [], get_plugins_manager()
+    )
+    add_variant_to_checkout(checkout_info, variant, 1)
+
+    variables = {
+        "id": to_global_id_or_none(checkout_with_problems),
+        "lines": [{"variantId": to_global_id_or_none(variant), "quantity": 3}],
+    }
+
+    # when
+    response = api_client.post_graphql(
+        MUTATION_CHECKOUT_LINES_UPDATE,
+        variables,
+    )
+    content = get_graphql_content(response)
+
+    # then
+    assert not content["data"]["checkoutLinesUpdate"]["errors"]

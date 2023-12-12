@@ -6,16 +6,16 @@ import jwt
 import pytest
 from django.core.serializers import serialize
 from google.cloud.pubsub_v1 import PublisherClient
-from kombu.asynchronous.aws.sqs.connection import AsyncSQSConnection
+from requests_hardened import HTTPSession
 
 from ....webhook.event_types import WebhookEventAsyncType
-from ...webhook import signature_for_payload
-from ...webhook.tasks import trigger_webhooks_async
+from ....webhook.transport import signature_for_payload
+from ....webhook.transport.asynchronous.transport import trigger_webhooks_async
 
 
 @pytest.mark.parametrize(
-    "queue_name, additional_call_args",
-    (("queue_name", {}), ("queue_name.fifo", {"MessageGroupId": "mirumee.com"})),
+    ("queue_name", "additional_call_args"),
+    [("queue_name", {}), ("queue_name.fifo", {"MessageGroupId": "mirumee.com"})],
 )
 def test_trigger_webhooks_with_aws_sqs(
     queue_name,
@@ -27,12 +27,12 @@ def test_trigger_webhooks_with_aws_sqs(
     permission_manage_products,
     monkeypatch,
 ):
-    mocked_client = MagicMock(spec=AsyncSQSConnection)
+    mocked_client = MagicMock()
     mocked_client.send_message.return_value = {"example": "response"}
     mocked_client_constructor = MagicMock(spec=boto3.client, return_value=mocked_client)
 
     monkeypatch.setattr(
-        "saleor.plugins.webhook.tasks.boto3.client",
+        "saleor.webhook.transport.utils.boto3.client",
         mocked_client_constructor,
     )
 
@@ -63,6 +63,10 @@ def test_trigger_webhooks_with_aws_sqs(
         "QueueUrl": f"https://sqs.us-east-1.amazonaws.com/account_id/{queue_name}",
         "MessageAttributes": {
             "SaleorDomain": {"DataType": "String", "StringValue": "mirumee.com"},
+            "SaleorApiUrl": {
+                "DataType": "String",
+                "StringValue": "http://mirumee.com/graphql/",
+            },
             "EventType": {"DataType": "String", "StringValue": "order_created"},
             "Signature": {"DataType": "String", "StringValue": expected_signature},
         },
@@ -73,7 +77,7 @@ def test_trigger_webhooks_with_aws_sqs(
 
 
 @pytest.mark.parametrize(
-    "secret_key, unquoted_secret",
+    ("secret_key", "unquoted_secret"),
     [
         ("secret_access", "secret_access"),
         ("secret%2B%2Faccess", "secret+/access"),
@@ -89,12 +93,12 @@ def test_trigger_webhooks_with_aws_sqs_and_secret_key(
     secret_key,
     unquoted_secret,
 ):
-    mocked_client = MagicMock(spec=AsyncSQSConnection)
+    mocked_client = MagicMock()
     mocked_client.send_message.return_value = {"example": "response"}
     mocked_client_constructor = MagicMock(spec=boto3.client, return_value=mocked_client)
 
     monkeypatch.setattr(
-        "saleor.plugins.webhook.tasks.boto3.client",
+        "saleor.webhook.transport.utils.boto3.client",
         mocked_client_constructor,
     )
 
@@ -128,6 +132,10 @@ def test_trigger_webhooks_with_aws_sqs_and_secret_key(
         QueueUrl="https://sqs.us-east-1.amazonaws.com/account_id/queue_name",
         MessageAttributes={
             "SaleorDomain": {"DataType": "String", "StringValue": "mirumee.com"},
+            "SaleorApiUrl": {
+                "DataType": "String",
+                "StringValue": "http://mirumee.com/graphql/",
+            },
             "EventType": {"DataType": "String", "StringValue": "order_created"},
             "Signature": {"DataType": "String", "StringValue": expected_signature},
         },
@@ -146,7 +154,7 @@ def test_trigger_webhooks_with_google_pub_sub(
     mocked_publisher = MagicMock(spec=PublisherClient)
     mocked_publisher.publish.return_value.result.return_value = "message_id"
     monkeypatch.setattr(
-        "saleor.plugins.webhook.tasks.pubsub_v1.PublisherClient",
+        "saleor.webhook.transport.utils.pubsub_v1.PublisherClient",
         lambda: mocked_publisher,
     )
     webhook.app.permissions.add(permission_manage_orders)
@@ -162,6 +170,7 @@ def test_trigger_webhooks_with_google_pub_sub(
         "projects/saleor/topics/test",
         expected_data.encode("utf-8"),
         saleorDomain="mirumee.com",
+        saleorApiUrl="http://mirumee.com/graphql/",
         eventType=WebhookEventAsyncType.ORDER_CREATED,
         signature=expected_signature,
     )
@@ -178,7 +187,7 @@ def test_trigger_webhooks_with_google_pub_sub_and_secret_key(
     mocked_publisher = MagicMock(spec=PublisherClient)
     mocked_publisher.publish.return_value.result.return_value = "message_id"
     monkeypatch.setattr(
-        "saleor.plugins.webhook.tasks.pubsub_v1.PublisherClient",
+        "saleor.webhook.transport.utils.pubsub_v1.PublisherClient",
         lambda: mocked_publisher,
     )
     webhook.app.permissions.add(permission_manage_orders)
@@ -198,12 +207,13 @@ def test_trigger_webhooks_with_google_pub_sub_and_secret_key(
         "projects/saleor/topics/test",
         message.encode("utf-8"),
         saleorDomain="mirumee.com",
+        saleorApiUrl="http://mirumee.com/graphql/",
         eventType=WebhookEventAsyncType.ORDER_CREATED,
         signature=expected_signature,
     )
 
 
-@patch("saleor.plugins.webhook.tasks.requests.post")
+@patch.object(HTTPSession, "request")
 def test_trigger_webhooks_with_http(
     mock_request,
     webhook,
@@ -241,17 +251,20 @@ def test_trigger_webhooks_with_http(
         "Saleor-Event": "order_created",
         "Saleor-Domain": "mirumee.com",
         "Saleor-Signature": expected_signature,
+        "Saleor-Api-Url": "http://mirumee.com/graphql/",
     }
 
     mock_request.assert_called_once_with(
+        "POST",
         webhook.target_url,
         data=bytes(expected_data, "utf-8"),
         headers=expected_headers,
         timeout=10,
+        allow_redirects=False,
     )
 
 
-@patch("saleor.plugins.webhook.tasks.requests.post")
+@patch.object(HTTPSession, "request")
 def test_trigger_webhooks_with_http_and_secret_key(
     mock_request, webhook, order_with_lines, permission_manage_orders
 ):
@@ -284,17 +297,20 @@ def test_trigger_webhooks_with_http_and_secret_key(
         "Saleor-Event": "order_created",
         "Saleor-Domain": "mirumee.com",
         "Saleor-Signature": expected_signature,
+        "Saleor-Api-Url": "http://mirumee.com/graphql/",
     }
 
     mock_request.assert_called_once_with(
+        "POST",
         webhook.target_url,
         data=bytes(expected_data, "utf-8"),
         headers=expected_headers,
         timeout=10,
+        allow_redirects=False,
     )
 
 
-@patch("saleor.plugins.webhook.tasks.requests.post")
+@patch.object(HTTPSession, "request")
 def test_trigger_webhooks_with_http_and_secret_key_as_empty_string(
     mock_request, webhook, order_with_lines, permission_manage_orders
 ):
@@ -325,6 +341,7 @@ def test_trigger_webhooks_with_http_and_secret_key_as_empty_string(
         "Saleor-Event": "order_created",
         "Saleor-Domain": "mirumee.com",
         "Saleor-Signature": expected_signature,
+        "Saleor-Api-Url": "http://mirumee.com/graphql/",
     }
 
     signature_headers = jwt.get_unverified_header(expected_signature)
@@ -334,8 +351,45 @@ def test_trigger_webhooks_with_http_and_secret_key_as_empty_string(
     assert signature_headers["alg"] == "RS256"
 
     mock_request.assert_called_once_with(
+        "POST",
         webhook.target_url,
         data=bytes(expected_data, "utf-8"),
         headers=expected_headers,
         timeout=10,
+        allow_redirects=False,
     )
+
+
+@patch.object(HTTPSession, "request")
+def test_trigger_webhooks_with_http_and_custom_headers(
+    mock_request, webhook, order_with_lines, permission_manage_orders
+):
+    # given
+    webhook.app.permissions.add(permission_manage_orders)
+    webhook.custom_headers = {"X-Key": "Value", "Authorization-Key": "Value"}
+    webhook.secret_key = ""
+    webhook.save()
+
+    expected_data = serialize("json", [order_with_lines])
+    expected_signature = signature_for_payload(expected_data.encode("utf-8"), "")
+    expected_headers = {
+        "Content-Type": "application/json",
+        "X-Saleor-Event": "order_created",
+        "X-Saleor-Domain": "mirumee.com",
+        "X-Saleor-Signature": expected_signature,
+        "Saleor-Event": "order_created",
+        "Saleor-Domain": "mirumee.com",
+        "Saleor-Signature": expected_signature,
+        "Saleor-Api-Url": "http://mirumee.com/graphql/",
+        "X-Key": "Value",
+        "Authorization-Key": "Value",
+    }
+
+    # when
+    trigger_webhooks_async(
+        expected_data, WebhookEventAsyncType.ORDER_CREATED, [webhook]
+    )
+
+    # then
+    mock_request.assert_called_once()
+    assert mock_request.call_args[1]["headers"] == expected_headers

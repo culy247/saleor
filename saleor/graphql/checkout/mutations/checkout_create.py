@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, Optional
 
 import graphene
 from django.conf import settings
@@ -7,26 +7,30 @@ from ....checkout import AddressType, models
 from ....checkout.error_codes import CheckoutErrorCode
 from ....checkout.utils import add_variants_to_checkout
 from ....core.tracing import traced_atomic_transaction
+from ....core.utils.country import get_active_country
 from ....product import models as product_models
 from ....warehouse.reservations import get_reservation_length, is_reservation_enabled
+from ....webhook.event_types import WebhookEventAsyncType
 from ...account.i18n import I18nMixin
 from ...account.types import AddressInput
-from ...app.dataloaders import load_app
+from ...app.dataloaders import get_app_promise
 from ...channel.utils import clean_channel
+from ...core import ResolveInfo
 from ...core.descriptions import (
     ADDED_IN_31,
     ADDED_IN_35,
     ADDED_IN_36,
     ADDED_IN_38,
     DEPRECATED_IN_3X_FIELD,
-    PREVIEW_FEATURE,
 )
+from ...core.doc_category import DOC_CATEGORY_CHECKOUT
 from ...core.enums import LanguageCodeEnum
 from ...core.mutations import ModelMutation
 from ...core.scalars import PositiveDecimal
-from ...core.types import CheckoutError, NonNullList
+from ...core.types import BaseInputObjectType, CheckoutError, NonNullList
+from ...core.utils import WebhookEventInfo
 from ...core.validators import validate_variants_available_in_channel
-from ...plugins.dataloaders import load_plugin_manager
+from ...plugins.dataloaders import get_plugin_manager_promise
 from ...product.types import ProductVariant
 from ...site.dataloaders import get_site_promise
 from ..types import Checkout
@@ -43,10 +47,10 @@ if TYPE_CHECKING:
     from ....account.models import Address
     from .utils import CheckoutLineData
 
-from ...meta.mutations import MetadataInput
+from ...meta.inputs import MetadataInput
 
 
-class CheckoutAddressValidationRules(graphene.InputObjectType):
+class CheckoutAddressValidationRules(BaseInputObjectType):
     check_required_fields = graphene.Boolean(
         description=(
             "Determines if an error should be raised when the provided address doesn't "
@@ -73,8 +77,11 @@ class CheckoutAddressValidationRules(graphene.InputObjectType):
         default_value=True,
     )
 
+    class Meta:
+        doc_category = DOC_CATEGORY_CHECKOUT
 
-class CheckoutValidationRules(graphene.InputObjectType):
+
+class CheckoutValidationRules(BaseInputObjectType):
     shipping_address = CheckoutAddressValidationRules(
         description=(
             "The validation rules that can be applied to provided shipping address"
@@ -88,8 +95,11 @@ class CheckoutValidationRules(graphene.InputObjectType):
         )
     )
 
+    class Meta:
+        doc_category = DOC_CATEGORY_CHECKOUT
 
-class CheckoutLineInput(graphene.InputObjectType):
+
+class CheckoutLineInput(BaseInputObjectType):
     quantity = graphene.Int(required=True, description="The number of items purchased.")
     variant_id = graphene.ID(required=True, description="ID of the product variant.")
     price = PositiveDecimal(
@@ -99,7 +109,6 @@ class CheckoutLineInput(graphene.InputObjectType):
             "with `HANDLE_CHECKOUTS` permission. When the line with the same variant "
             "will be provided multiple times, the last price will be used."
             + ADDED_IN_31
-            + PREVIEW_FEATURE
         ),
     )
     force_new_line = graphene.Boolean(
@@ -107,7 +116,7 @@ class CheckoutLineInput(graphene.InputObjectType):
         default_value=False,
         description=(
             "Flag that allow force splitting the same variant into multiple lines "
-            "by skipping the matching logic. " + ADDED_IN_36 + PREVIEW_FEATURE
+            "by skipping the matching logic. " + ADDED_IN_36
         ),
     )
     metadata = NonNullList(
@@ -116,8 +125,11 @@ class CheckoutLineInput(graphene.InputObjectType):
         required=False,
     )
 
+    class Meta:
+        doc_category = DOC_CATEGORY_CHECKOUT
 
-class CheckoutCreateInput(graphene.InputObjectType):
+
+class CheckoutCreateInput(BaseInputObjectType):
     channel = graphene.String(
         description="Slug of a channel in which to create a checkout."
     )
@@ -144,11 +156,12 @@ class CheckoutCreateInput(graphene.InputObjectType):
     validation_rules = CheckoutValidationRules(
         required=False,
         description=(
-            "The checkout validation rules that can be changed."
-            + ADDED_IN_35
-            + PREVIEW_FEATURE
+            "The checkout validation rules that can be changed." + ADDED_IN_35
         ),
     )
+
+    class Meta:
+        doc_category = DOC_CATEGORY_CHECKOUT
 
 
 class CheckoutCreate(ModelMutation, I18nMixin):
@@ -169,17 +182,24 @@ class CheckoutCreate(ModelMutation, I18nMixin):
 
     class Meta:
         description = "Create a new checkout."
+        doc_category = DOC_CATEGORY_CHECKOUT
         model = models.Checkout
         object_type = Checkout
         return_field_name = "checkout"
         error_type_class = CheckoutError
         error_type_field = "checkout_errors"
+        webhook_events_info = [
+            WebhookEventInfo(
+                type=WebhookEventAsyncType.CHECKOUT_CREATED,
+                description="A checkout was created.",
+            )
+        ]
 
     @classmethod
     def clean_checkout_lines(
-        cls, info, lines, country, channel
-    ) -> Tuple[List[product_models.ProductVariant], List["CheckoutLineData"]]:
-        app = load_app(info.context)
+        cls, info: ResolveInfo, lines, country, channel
+    ) -> tuple[list[product_models.ProductVariant], list["CheckoutLineData"]]:
+        app = get_app_promise(info.context).get()
         site = get_site_promise(info.context).get()
         check_permissions_for_custom_prices(app, lines)
         variant_ids = [line["variant_id"] for line in lines]
@@ -197,7 +217,9 @@ class CheckoutCreate(ModelMutation, I18nMixin):
         variant_db_ids = {variant.id for variant in variants}
         validate_variants_available_for_purchase(variant_db_ids, channel.id)
         validate_variants_available_in_channel(
-            variant_db_ids, channel.id, CheckoutErrorCode.UNAVAILABLE_VARIANT_IN_CHANNEL
+            variant_db_ids,
+            channel.id,
+            CheckoutErrorCode.UNAVAILABLE_VARIANT_IN_CHANNEL.value,
         )
         validate_variants_are_published(variant_db_ids, channel.id)
 
@@ -254,23 +276,35 @@ class CheckoutCreate(ModelMutation, I18nMixin):
         return None
 
     @classmethod
-    def clean_input(cls, info, instance: models.Checkout, data, input_cls=None):
+    def clean_input(cls, info: ResolveInfo, instance: models.Checkout, data, **kwargs):
         user = info.context.user
         channel = data.pop("channel")
-        cleaned_input = super().clean_input(info, instance, data)
+        cleaned_input = super().clean_input(info, instance, data, **kwargs)
 
         cleaned_input["channel"] = channel
         cleaned_input["currency"] = channel.currency_code
-
+        shipping_address_metadata = (
+            data.get("shipping_address", {}).pop("metadata", list())
+            if data.get("shipping_address")
+            else None
+        )
+        billing_address_metadata = (
+            data.get("billing_address", {}).pop("metadata", list())
+            if data.get("billing_address")
+            else None
+        )
         shipping_address = cls.retrieve_shipping_address(user, data)
         billing_address = cls.retrieve_billing_address(user, data)
-
         if shipping_address:
-            country = shipping_address.country.code
-        else:
-            country = channel.default_country
+            cls.update_metadata(shipping_address, shipping_address_metadata)
+        if billing_address:
+            cls.update_metadata(billing_address, billing_address_metadata)
 
-        # Resolve and process the lines, retrieving the variants and quantities
+        country = get_active_country(
+            channel,
+            shipping_address,
+            billing_address,
+        )
         lines = data.pop("lines", None)
         if lines:
             (
@@ -297,7 +331,7 @@ class CheckoutCreate(ModelMutation, I18nMixin):
         return cleaned_input
 
     @classmethod
-    def save(cls, info, instance: models.Checkout, cleaned_input):
+    def save(cls, info: ResolveInfo, instance: models.Checkout, cleaned_input):
         with traced_atomic_transaction():
             # Create the checkout object
             instance.save()
@@ -324,7 +358,7 @@ class CheckoutCreate(ModelMutation, I18nMixin):
 
             # Save addresses
             shipping_address = cleaned_input.get("shipping_address")
-            if shipping_address and instance.is_shipping_required():
+            if shipping_address:
                 shipping_address.save()
                 instance.shipping_address = shipping_address.get_copy()
 
@@ -336,7 +370,7 @@ class CheckoutCreate(ModelMutation, I18nMixin):
             instance.save()
 
     @classmethod
-    def get_instance(cls, info, **data):
+    def get_instance(cls, info: ResolveInfo, **data):
         instance = super().get_instance(info, **data)
         user = info.context.user
         if user:
@@ -344,13 +378,15 @@ class CheckoutCreate(ModelMutation, I18nMixin):
         return instance
 
     @classmethod
-    def perform_mutation(cls, _root, info, **data):
-        channel_input = data.get("input", {}).get("channel")
+    def perform_mutation(  # type: ignore[override]
+        cls, _root, info: ResolveInfo, /, *, input
+    ):
+        channel_input = input.get("channel")
         channel = clean_channel(channel_input, error_class=CheckoutErrorCode)
         if channel:
-            data["input"]["channel"] = channel
-        response = super().perform_mutation(_root, info, **data)
-        manager = load_plugin_manager(info.context)
+            input["channel"] = channel
+        response = super().perform_mutation(_root, info, input=input)
+        manager = get_plugin_manager_promise(info.context).get()
         cls.call_event(manager.checkout_created, response.checkout)
         response.created = True
         return response

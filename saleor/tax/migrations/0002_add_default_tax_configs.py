@@ -4,7 +4,6 @@ from django.db import migrations
 
 from .. import TaxCalculationStrategy
 
-
 AVATAX_PLUGIN_ID = "mirumee.taxes.avalara"
 VATLAYER_ID = "mirumee.taxes.vatlayer"
 
@@ -18,17 +17,26 @@ def add_tax_configuration_for_channels(apps, schema_editor):
     SiteSettings = apps.get_model("site", "SiteSettings")
 
     site_settings = SiteSettings.objects.first()
-
     tax_configurations = []
+
     for channel in Channel.objects.all():
-        tax_configurations.append(
-            TaxConfiguration(
-                channel=channel,
-                charge_taxes=True,
-                display_gross_prices=site_settings.display_gross_prices,
-                prices_entered_with_tax=site_settings.include_taxes_in_prices,
-            )
+        # For US channels create a configuration that's meaningful in US, where prices
+        # as entered and displayed without tax.
+        if channel.default_country == "US":
+            display_gross_prices = False
+            prices_entered_with_tax = False
+        else:
+            display_gross_prices = site_settings.display_gross_prices
+            prices_entered_with_tax = site_settings.include_taxes_in_prices
+
+        tax_configuration = TaxConfiguration(
+            channel=channel,
+            charge_taxes=True,
+            display_gross_prices=display_gross_prices,
+            prices_entered_with_tax=prices_entered_with_tax,
         )
+        tax_configurations.append(tax_configuration)
+
     TaxConfiguration.objects.bulk_create(tax_configurations)
 
 
@@ -73,10 +81,16 @@ def populate_tax_calculation_strategy(apps, schema_editor):
         tc.tax_calculation_strategy = TaxCalculationStrategy.TAX_APP
 
         override_global_tax = config_dict.get("override_global_tax")
-        if override_global_tax:
+        # There might be a situation that the value is a string `true` or `false`,
+        # so we need to handle such situation too
+        if override_global_tax is True or override_global_tax == "true":
             include_taxes_in_prices = config_dict.get("include_taxes_in_prices")
             if include_taxes_in_prices is not None:
-                tc.prices_entered_with_tax = include_taxes_in_prices
+                tc.prices_entered_with_tax = (
+                    include_taxes_in_prices
+                    if isinstance(include_taxes_in_prices, bool)
+                    else include_taxes_in_prices.lower() == "true"
+                )
 
         avatax_tax_configs.append(tc)
     TaxConfiguration.objects.bulk_update(
@@ -92,8 +106,14 @@ def populate_tax_calculation_strategy(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-
-    dependencies = [("tax", "0001_initial"), ("plugins", "0010_auto_20220104_1239")]
+    dependencies = [
+        ("app", "0017_app_audience"),
+        ("channel", "0005_channel_allocation_strategy"),
+        ("site", "0034_sitesettings_limit_quantity_per_checkout"),
+        ("tax", "0001_initial"),
+        ("plugins", "0010_auto_20220104_1239"),
+        ("webhook", "0008_webhook_subscription_query"),
+    ]
 
     operations = [
         migrations.RunPython(

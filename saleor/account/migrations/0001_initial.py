@@ -1,12 +1,9 @@
-from __future__ import unicode_literals
-
 import django.db.models.deletion
 import django.utils.timezone
 from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [("auth", "0006_require_contenttypes_0002")]
 
     replaces = [("userprofile", "0001_initial")]

@@ -1,12 +1,14 @@
 import graphene
 import requests
+from django.conf import settings
 from django.core.exceptions import ValidationError
 
 from ....app.error_codes import AppErrorCode
-from ....app.installation_utils import REQUEST_TIMEOUT
+from ....app.installation_utils import fetch_brand_data, fetch_manifest
 from ....app.manifest_validations import clean_manifest_data, clean_manifest_url
-from ....core.permissions import AppPermission
+from ....permission.enums import AppPermission
 from ...core import types as grapqhl_types
+from ...core.doc_category import DOC_CATEGORY_APPS
 from ...core.enums import PermissionEnum
 from ...core.mutations import BaseMutation
 from ...core.types import AppError
@@ -14,13 +16,16 @@ from ..types import Manifest
 
 
 class AppFetchManifest(BaseMutation):
-    manifest = graphene.Field(Manifest)
+    manifest = graphene.Field(Manifest, description="The validated manifest.")
 
     class Arguments:
-        manifest_url = graphene.String(required=True)
+        manifest_url = graphene.String(
+            required=True, description="URL to app's manifest in JSON format."
+        )
 
     class Meta:
         description = "Fetch and validate manifest."
+        doc_category = DOC_CATEGORY_APPS
         permissions = (AppPermission.MANAGE_APPS,)
         error_type_class = AppError
         error_type_field = "app_errors"
@@ -33,9 +38,7 @@ class AppFetchManifest(BaseMutation):
     @classmethod
     def fetch_manifest(cls, manifest_url):
         try:
-            response = requests.get(manifest_url, timeout=REQUEST_TIMEOUT)
-            response.raise_for_status()
-            return response.json()
+            return fetch_manifest(manifest_url)
         except requests.Timeout:
             msg = "The request to fetch manifest data timed out."
             code = AppErrorCode.MANIFEST_URL_CANT_CONNECT.value
@@ -71,29 +74,37 @@ class AppFetchManifest(BaseMutation):
             extensions=cleaned_data.get("extensions", []),
             webhooks=cleaned_data.get("webhooks", []),
             audience=cleaned_data.get("audience"),
+            required_saleor_version=cleaned_data.get("requiredSaleorVersion"),
+            author=cleaned_data.get("author"),
+            brand=cleaned_data.get("brand"),
         )
 
     @classmethod
     def clean_manifest_data(cls, info, manifest_data):
         clean_manifest_data(manifest_data)
+        # Brand data is not essential for the mutation, so there is a short,
+        # custom timeout instead of Saleor's default.
+        manifest_data["brand"] = fetch_brand_data(
+            manifest_data, timeout=(settings.REQUESTS_CONN_EST_TIMEOUT, 5)
+        )
 
         manifest_data["permissions"] = [
             grapqhl_types.Permission(
-                code=PermissionEnum.get(p.formated_codename), name=p.name
+                code=PermissionEnum.get(p.formatted_codename), name=p.name
             )
             for p in manifest_data["permissions"]
         ]
         for extension in manifest_data.get("extensions", []):
             extension["permissions"] = [
                 grapqhl_types.Permission(
-                    code=PermissionEnum.get(p.formated_codename),
+                    code=PermissionEnum.get(p.formatted_codename),
                     name=p.name,
                 )
                 for p in extension["permissions"]
             ]
 
     @classmethod
-    def perform_mutation(cls, _root, info, **data):
+    def perform_mutation(cls, _root, info, /, **data):
         manifest_url = data.get("manifest_url")
         clean_manifest_url(manifest_url)
         manifest_data = cls.fetch_manifest(manifest_url)

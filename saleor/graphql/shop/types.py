@@ -3,27 +3,37 @@ from typing import Optional
 import graphene
 from django.conf import settings
 from django_countries import countries
-from django_prices_vatlayer.models import VAT
 from phonenumbers import COUNTRY_CODE_TO_REGION_CODE
 
-from ... import __version__
+from ... import __version__, schema_version
 from ...account import models as account_models
 from ...channel import models as channel_models
-from ...core.permissions import AuthorizationFilters, SitePermissions, get_permissions
-from ...core.tracing import traced_resolver
-from ...core.utils import build_absolute_uri
+from ...core.models import ModelWithMetadata
+from ...core.utils import build_absolute_uri, get_domain, is_ssl_enabled
+from ...permission.auth_filters import AuthorizationFilters
+from ...permission.enums import SitePermissions, get_permissions
 from ...site import models as site_models
 from ..account.types import Address, AddressInput, StaffNotificationRecipient
-from ..checkout.types import PaymentGateway
+from ..core import ResolveInfo
+from ..core.context import get_database_connection_name
 from ..core.descriptions import (
     ADDED_IN_31,
+    ADDED_IN_35,
+    ADDED_IN_314,
+    ADDED_IN_315,
     DEPRECATED_IN_3X_FIELD,
     DEPRECATED_IN_3X_INPUT,
-    PREVIEW_FEATURE,
+)
+from ..core.doc_category import (
+    DOC_CATEGORY_AUTH,
+    DOC_CATEGORY_GIFT_CARDS,
+    DOC_CATEGORY_ORDERS,
 )
 from ..core.enums import LanguageCodeEnum, WeightUnitsEnum
 from ..core.fields import PermissionsField
+from ..core.tracing import traced_resolver
 from ..core.types import (
+    BaseObjectType,
     CountryDisplay,
     LanguageDisplay,
     ModelObjectType,
@@ -32,9 +42,11 @@ from ..core.types import (
     TimePeriod,
 )
 from ..core.utils import str_to_enum
-from ..plugins.dataloaders import load_plugin_manager
+from ..meta.types import ObjectWithMetadata
+from ..payment.types import PaymentGateway
+from ..plugins.dataloaders import plugin_manager_promise_callback
 from ..shipping.types import ShippingMethod
-from ..site.dataloaders import load_site_callback
+from ..site.dataloaders import get_site_promise, load_site_callback
 from ..translations.fields import TranslationField
 from ..translations.resolvers import resolve_translation
 from ..translations.types import ShopTranslation
@@ -43,28 +55,34 @@ from .enums import GiftCardSettingsExpiryTypeEnum
 from .filters import CountryFilterInput
 from .resolvers import resolve_available_shipping_methods, resolve_countries
 
+# The "Shop" type always have the same ID since there is a single instance of it.
+# Some mutations, such as generic metadata API, require an ID. To make it work we
+# assume that Shop's ID is always 1.
+SHOP_ID = "1"
+
 
 class Domain(graphene.ObjectType):
     host = graphene.String(description="The host name of the domain.", required=True)
     ssl_enabled = graphene.Boolean(
         description="Inform if SSL is enabled.", required=True
     )
-    url = graphene.String(description="Shop's absolute URL.", required=True)
+    url = graphene.String(description="The absolute URL of the API.", required=True)
 
     class Meta:
-        description = "Represents shop's domain."
+        description = "Represents API domain."
 
 
-class OrderSettings(ModelObjectType):
+class OrderSettings(ModelObjectType[site_models.SiteSettings]):
     automatically_confirm_all_new_orders = graphene.Boolean(required=True)
     automatically_fulfill_non_shippable_gift_card = graphene.Boolean(required=True)
 
     class Meta:
         description = "Order related settings from site settings."
+        doc_category = DOC_CATEGORY_ORDERS
         model = site_models.SiteSettings
 
 
-class GiftCardSettings(ModelObjectType):
+class GiftCardSettings(ModelObjectType[site_models.SiteSettings]):
     expiry_type = GiftCardSettingsExpiryTypeEnum(
         description="The gift card expiry type settings.", required=True
     )
@@ -74,6 +92,7 @@ class GiftCardSettings(ModelObjectType):
 
     class Meta:
         description = "Gift card related settings from site settings."
+        doc_category = DOC_CATEGORY_GIFT_CARDS
         model = site_models.SiteSettings
 
     def resolve_expiry_type(root, info):
@@ -87,19 +106,25 @@ class GiftCardSettings(ModelObjectType):
         )
 
 
-class ExternalAuthentication(graphene.ObjectType):
+class ExternalAuthentication(BaseObjectType):
     id = graphene.String(
         description="ID of external authentication plugin.", required=True
     )
     name = graphene.String(description="Name of external authentication plugin.")
 
+    class Meta:
+        description = "External authentication plugin."
+        doc_category = DOC_CATEGORY_AUTH
+
 
 class Limits(graphene.ObjectType):
-    channels = graphene.Int()
-    orders = graphene.Int()
-    product_variants = graphene.Int()
-    staff_users = graphene.Int()
-    warehouses = graphene.Int()
+    channels = graphene.Int(description="Defines the number of channels.")
+    orders = graphene.Int(description="Defines the number of order.")
+    product_variants = graphene.Int(
+        description="Defines the number of product variants."
+    )
+    staff_users = graphene.Int(description="Defines the number of staff users.")
+    warehouses = graphene.Int(description="Defines the number of warehouses.")
 
 
 class LimitInfo(graphene.ObjectType):
@@ -114,8 +139,12 @@ class LimitInfo(graphene.ObjectType):
         description="Defines the allowed maximum resource usage, null means unlimited.",
     )
 
+    class Meta:
+        description = "Store the current and allowed usage."
+
 
 class Shop(graphene.ObjectType):
+    id = graphene.ID(description="ID of the shop.", required=True)
     available_payment_gateways = NonNullList(
         PaymentGateway,
         currency=graphene.Argument(
@@ -220,7 +249,10 @@ class Shop(graphene.ObjectType):
         required=True,
     )
     track_inventory_by_default = graphene.Boolean(
-        description="Enable inventory tracking."
+        description=(
+            "This field is used as a default value for "
+            "`ProductVariant.trackInventory`."
+        )
     )
     default_weight_unit = WeightUnitsEnum(description="Default weight unit.")
     translation = TranslationField(ShopTranslation, type_name="shop", resolver=None)
@@ -251,7 +283,7 @@ class Shop(graphene.ObjectType):
         graphene.Int,
         description=(
             "Default number of maximum line quantity in single checkout "
-            "(per single checkout line)." + ADDED_IN_31 + PREVIEW_FEATURE
+            "(per single checkout line)." + ADDED_IN_31
         ),
         permissions=[SitePermissions.MANAGE_SETTINGS],
     )
@@ -278,6 +310,21 @@ class Shop(graphene.ObjectType):
         required=False,
         permissions=[SitePermissions.MANAGE_SETTINGS],
     )
+    enable_account_confirmation_by_email = PermissionsField(
+        graphene.Boolean,
+        description=(
+            "Determines if account confirmation by email is enabled." + ADDED_IN_314
+        ),
+        permissions=[SitePermissions.MANAGE_SETTINGS],
+    )
+    allow_login_without_confirmation = PermissionsField(
+        graphene.Boolean,
+        description=(
+            "Determines if user can login without confirmation when "
+            "`enableAccountConfrimation` is enabled." + ADDED_IN_315
+        ),
+        permissions=[SitePermissions.MANAGE_SETTINGS],
+    )
     limits = PermissionsField(
         LimitInfo,
         required=True,
@@ -292,6 +339,10 @@ class Shop(graphene.ObjectType):
             AuthorizationFilters.AUTHENTICATED_STAFF_USER,
             AuthorizationFilters.AUTHENTICATED_APP,
         ],
+    )
+    schema_version = graphene.String(
+        description="Minor Saleor API version." + ADDED_IN_35,
+        required=True,
     )
 
     # deprecated
@@ -326,19 +377,36 @@ class Shop(graphene.ObjectType):
         description = (
             "Represents a shop resource containing general shop data and configuration."
         )
+        interfaces = [ObjectWithMetadata]
+
+    @staticmethod
+    def get_model():
+        return site_models.SiteSettings
+
+    @staticmethod
+    def get_node(info: ResolveInfo, id):
+        if id == SHOP_ID:
+            site = get_site_promise(info.context).get()
+            return site.settings
+
+        return None
+
+    @staticmethod
+    def resolve_id(_, _info):
+        return graphene.Node.to_global_id("Shop", SHOP_ID)
 
     @staticmethod
     @traced_resolver
+    @plugin_manager_promise_callback
     def resolve_available_payment_gateways(
-        _, info, currency: Optional[str] = None, channel: Optional[str] = None
+        _, _info, manager, currency: Optional[str] = None, channel: Optional[str] = None
     ):
-        manager = load_plugin_manager(info.context)
         return manager.list_payment_gateways(currency=currency, channel_slug=channel)
 
     @staticmethod
     @traced_resolver
-    def resolve_available_external_authentications(_, info):
-        manager = load_plugin_manager(info.context)
+    @plugin_manager_promise_callback
+    def resolve_available_external_authentications(_, _info, manager):
         return manager.list_external_authentications(active_only=True)
 
     @staticmethod
@@ -348,21 +416,23 @@ class Shop(graphene.ObjectType):
         )
 
     @staticmethod
-    def resolve_channel_currencies(_, _info):
+    def resolve_channel_currencies(_, info):
         return set(
-            channel_models.Channel.objects.values_list("currency_code", flat=True)
+            channel_models.Channel.objects.using(
+                get_database_connection_name(info.context)
+            ).values_list("currency_code", flat=True)
         )
 
     @staticmethod
-    def resolve_countries(_, _info, **kwargs):
-        return resolve_countries(**kwargs)
+    def resolve_countries(_, info, **kwargs):
+        return resolve_countries(info, **kwargs)
 
     @staticmethod
     @load_site_callback
     def resolve_domain(_, _info, site):
         return Domain(
-            host=site.domain,
-            ssl_enabled=settings.ENABLE_SSL,
+            host=get_domain(site),
+            ssl_enabled=is_ssl_enabled(),
             url=build_absolute_uri("/"),
         )
 
@@ -427,13 +497,12 @@ class Shop(graphene.ObjectType):
 
     @staticmethod
     @traced_resolver
-    def resolve_default_country(_, _info):
+    def resolve_default_country(_, info):
         default_country_code = settings.DEFAULT_COUNTRY
         default_country_name = countries.countries.get(default_country_code)
         if default_country_name:
-            vat = VAT.objects.filter(country_code=default_country_code).first()
             default_country = CountryDisplay(
-                code=default_country_code, country=default_country_name, vat=vat
+                code=default_country_code, country=default_country_name, vat=None
             )
         else:
             default_country = None
@@ -495,8 +564,20 @@ class Shop(graphene.ObjectType):
         return site.settings.default_digital_url_valid_days
 
     @staticmethod
-    def resolve_staff_notification_recipients(_, _info):
-        return account_models.StaffNotificationRecipient.objects.all()
+    def resolve_staff_notification_recipients(_, info):
+        return account_models.StaffNotificationRecipient.objects.using(
+            get_database_connection_name(info.context)
+        ).all()
+
+    @staticmethod
+    @load_site_callback
+    def resolve_enable_account_confirmation_by_email(_, _info, site):
+        return site.settings.enable_account_confirmation_by_email
+
+    @staticmethod
+    @load_site_callback
+    def resolve_allow_login_without_confirmation(_, _info, site):
+        return site.settings.allow_login_without_confirmation
 
     @staticmethod
     def resolve_limits(_, _info):
@@ -505,6 +586,10 @@ class Shop(graphene.ObjectType):
     @staticmethod
     def resolve_version(_, _info):
         return __version__
+
+    @staticmethod
+    def resolve_schema_version(_, _info):
+        return schema_version
 
     # deprecated
 
@@ -517,3 +602,37 @@ class Shop(graphene.ObjectType):
     @load_site_callback
     def resolve_display_gross_prices(_, _info, site):
         return site.settings.display_gross_prices
+
+    @staticmethod
+    @load_site_callback
+    def resolve_metadata(root: ModelWithMetadata, info: ResolveInfo, site):
+        return ObjectWithMetadata.resolve_metadata(site.settings, info)
+
+    @staticmethod
+    @load_site_callback
+    def resolve_metafield(_, info: ResolveInfo, site, *, key: str):
+        return ObjectWithMetadata.resolve_metafield(site.settings, info, key=key)
+
+    @staticmethod
+    @load_site_callback
+    def resolve_metafields(_, info: ResolveInfo, site, *, keys=None):
+        return ObjectWithMetadata.resolve_metafields(site.settings, info, keys=keys)
+
+    @staticmethod
+    @load_site_callback
+    def resolve_private_metadata(_, info: ResolveInfo, site):
+        return ObjectWithMetadata.resolve_private_metadata(site.settings, info)
+
+    @staticmethod
+    @load_site_callback
+    def resolve_private_metafield(_, info: ResolveInfo, site, *, key: str):
+        return ObjectWithMetadata.resolve_private_metafield(
+            site.settings, info, key=key
+        )
+
+    @staticmethod
+    @load_site_callback
+    def resolve_private_metafields(_, info: ResolveInfo, site, *, keys=None):
+        return ObjectWithMetadata.resolve_private_metafields(
+            site.settings, info, keys=keys
+        )

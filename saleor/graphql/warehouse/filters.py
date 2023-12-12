@@ -7,10 +7,12 @@ from ...product.models import Product, ProductVariant
 from ...warehouse import WarehouseClickAndCollectOption
 from ...warehouse.models import Stock, Warehouse
 from ..channel.types import Channel
+from ..core.doc_category import DOC_CATEGORY_PRODUCTS
 from ..core.filters import (
     EnumFilter,
     GlobalIDMultipleChoiceFilter,
     ListObjectTypeFilter,
+    MetadataFilterBase,
     filter_slug_list,
 )
 from ..core.types import FilterInputObjectType
@@ -83,7 +85,7 @@ def filter_search_stock(qs, _, value):
     return qs
 
 
-class WarehouseFilter(django_filters.FilterSet):
+class WarehouseFilter(MetadataFilterBase):
     search = django_filters.CharFilter(method=filter_search_warehouse)
     ids = GlobalIDMultipleChoiceFilter(field_name="id")
     is_private = django_filters.BooleanFilter(field_name="is_private")
@@ -101,6 +103,7 @@ class WarehouseFilter(django_filters.FilterSet):
 
 class WarehouseFilterInput(FilterInputObjectType):
     class Meta:
+        doc_category = DOC_CATEGORY_PRODUCTS
         filterset_class = WarehouseFilter
 
 
@@ -114,4 +117,5 @@ class StockFilter(django_filters.FilterSet):
 
 class StockFilterInput(FilterInputObjectType):
     class Meta:
+        doc_category = DOC_CATEGORY_PRODUCTS
         filterset_class = StockFilter
