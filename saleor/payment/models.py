@@ -32,7 +32,7 @@ class TransactionItem(ModelWithMetadata):
     use_old_id = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     modified_at = models.DateTimeField(auto_now=True)
-
+    idempotency_key = models.CharField(max_length=512, blank=True, null=True)
     name = models.CharField(max_length=512, blank=True, null=True, default="")
     message = models.CharField(max_length=512, blank=True, null=True, default="")
     psp_reference = models.CharField(max_length=512, blank=True, null=True)
@@ -154,10 +154,17 @@ class TransactionItem(ModelWithMetadata):
         indexes = [
             *ModelWithMetadata.Meta.indexes,
         ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["app_identifier", "idempotency_key"],
+                name="unique_transaction_idempotency",
+            ),
+        ]
 
 
 class TransactionEvent(models.Model):
     created_at = models.DateTimeField(default=timezone.now)
+    idempotency_key = models.CharField(max_length=512, blank=True, null=True)
     psp_reference = models.CharField(max_length=512, blank=True, null=True)
     message = models.CharField(max_length=512, blank=True, null=True, default="")
     transaction = models.ForeignKey(
@@ -198,6 +205,12 @@ class TransactionEvent(models.Model):
 
     class Meta:
         ordering = ("pk",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["transaction_id", "idempotency_key"],
+                name="unique_transaction_event_idempotency",
+            )
+        ]
 
 
 class Payment(ModelWithMetadata):

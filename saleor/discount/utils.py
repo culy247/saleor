@@ -1,4 +1,3 @@
-import datetime
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from decimal import ROUND_HALF_UP, Decimal
@@ -13,6 +12,7 @@ from typing import (
 from uuid import UUID
 
 import graphene
+from django.db import transaction
 from django.db.models import Exists, F, OuterRef, QuerySet
 from django.utils import timezone
 from prices import Money, TaxedMoney, fixed_discount, percentage_discount
@@ -21,6 +21,7 @@ from ..channel.models import Channel
 from ..core.taxes import zero_money
 from ..core.utils.promo_code import InvalidPromoCode
 from ..discount.models import VoucherCustomer
+from ..product.models import Product, ProductVariant
 from . import DiscountType, PromotionRuleInfo
 from .models import (
     CheckoutLineDiscount,
@@ -173,15 +174,20 @@ def calculate_discounted_price_for_rules(
 def calculate_discounted_price_for_promotions(
     *,
     price: Money,
-    rules_info_per_promotion_id: dict[UUID, list[PromotionRuleInfo]],
+    rules_info_per_variant_and_promotion_id: dict[
+        int, dict[UUID, list[PromotionRuleInfo]]
+    ],
     channel: "Channel",
-    variant_id: Optional[int] = None,
+    variant_id: int,
 ) -> list[tuple[UUID, Money]]:
     """Return minimum product's price of all prices with promotions applied."""
     applied_discounts = []
+    rules_info_per_promotion_id = rules_info_per_variant_and_promotion_id.get(
+        variant_id
+    )
     if rules_info_per_promotion_id:
         applied_discounts = get_best_promotion_discount(
-            price, rules_info_per_promotion_id, channel, variant_id
+            price, rules_info_per_promotion_id, channel
         )
     return applied_discounts
 
@@ -190,7 +196,6 @@ def get_best_promotion_discount(
     price: Money,
     rules_info_per_promotion_id: dict[UUID, list[PromotionRuleInfo]],
     channel: "Channel",
-    variant_id: Optional[int] = None,
 ) -> list[tuple[UUID, Money]]:
     """Return the rules with the discount amounts for the best promotion.
 
@@ -207,7 +212,6 @@ def get_best_promotion_discount(
             for rule_id, discount in get_product_promotion_discounts(
                 rules_info=rules_info,
                 channel=channel,
-                variant_id=variant_id,
             )
         ]
         for _, rules_info in rules_info_per_promotion_id.items()
@@ -227,12 +231,11 @@ def get_product_promotion_discounts(
     *,
     rules_info: list[PromotionRuleInfo],
     channel: "Channel",
-    variant_id: Optional[int],
 ) -> Iterator[tuple[UUID, Callable]]:
-    """Return promotion rule id, discount value for all rules applicable on product."""
+    """Return rule id, discount value for all rules applicable for given channel."""
     for rule_info in rules_info:
         try:
-            yield get_product_discount_on_promotion(rule_info, channel, variant_id)
+            yield get_product_discount_on_promotion(rule_info, channel)
         except NotApplicable:
             pass
 
@@ -240,10 +243,9 @@ def get_product_promotion_discounts(
 def get_product_discount_on_promotion(
     rule_info: PromotionRuleInfo,
     channel: "Channel",
-    variant_id: Optional[int] = None,
 ) -> tuple[UUID, Callable]:
     """Return rule id, discount value if rule applied or raise NotApplicable."""
-    if variant_id in rule_info.variant_ids and channel.id in rule_info.channel_ids:
+    if channel.id in rule_info.channel_ids:
         return rule_info.rule.id, rule_info.rule.get_discount(channel.currency_code)
     raise NotApplicable("Promotion rule not applicable for this product")
 
@@ -279,7 +281,7 @@ def validate_voucher_in_order(order: "Order"):
     if not order.voucher:
         return
 
-    subtotal = order.get_subtotal()
+    subtotal = order.subtotal
     quantity = order.get_total_quantity()
     customer_email = order.get_customer_email()
     tax_configuration = order.channel.tax_configuration
@@ -503,30 +505,55 @@ def _update_line_discount(
         updated_fields.append("translated_name")
 
 
-def fetch_active_promotion_rules(
+def get_variants_to_promotions_map(
     variant_qs: "ProductVariantQueryset",
-    date: Optional[datetime.date] = None,
-) -> dict[UUID, list[PromotionRuleInfo]]:
-    from ..graphql.discount.utils import get_variants_for_predicate
+) -> dict[int, dict[UUID, list[PromotionRuleInfo]]]:
+    """Return map of variant ids to the list of promotion rules that can be applied.
 
-    rules_info_per_promotion_id = defaultdict(list)
+    The data is returned in the following shape:
+    {
+        variant_id_1: {
+            promotion_id_1: [PromotionRuleInfo_1, PromotionRuleInfo_2],
+            promotion_id_2: [PromotionRuleInfo_3],
+        }
+        variant_id_2: {
+            promotion_id_1: [PromotionRuleInfo_1]
+        }
+    }
+    """
+    rules_info_per_variant_and_promotion_id: dict[
+        int, dict[UUID, list[PromotionRuleInfo]]
+    ] = defaultdict(lambda: defaultdict(list))
 
-    promotions = Promotion.objects.active(date)
+    promotions = Promotion.objects.active()
+    PromotionRuleVariant = PromotionRule.variants.through
+    promotion_rule_variants = PromotionRuleVariant.objects.filter(
+        Exists(variant_qs.filter(id=OuterRef("productvariant_id")))
+    )
+
+    # fetch rules only for active promotions
     rules = PromotionRule.objects.filter(
-        Exists(promotions.filter(id=OuterRef("promotion_id")))
+        Exists(promotions.filter(id=OuterRef("promotion_id"))),
+        Exists(promotion_rule_variants.filter(promotionrule_id=OuterRef("pk"))),
     ).prefetch_related("channels")
     rule_to_channel_ids_map = _get_rule_to_channel_ids_map(rules)
-    for rule in rules.iterator():
-        variants = get_variants_for_predicate(rule.catalogue_predicate, variant_qs)
-        rules_info_per_promotion_id[rule.promotion_id].append(
+    rules_in_bulk = rules.in_bulk()
+
+    for promotion_rule_variant in list(promotion_rule_variants.iterator()):
+        rule_id = promotion_rule_variant.promotionrule_id
+        rule = rules_in_bulk.get(rule_id)
+        # there is no rule when it is a part of inactive promotion
+        if not rule:
+            continue
+        variant_id = promotion_rule_variant.productvariant_id
+        rules_info_per_variant_and_promotion_id[variant_id][rule.promotion_id].append(
             PromotionRuleInfo(
                 rule=rule,
-                variants=variants,
-                variant_ids=list(variants.values_list("id", flat=True)),
-                channel_ids=rule_to_channel_ids_map.get(rule.id, []),
+                channel_ids=rule_to_channel_ids_map.get(rule_id, []),
             )
         )
-    return rules_info_per_promotion_id
+
+    return rules_info_per_variant_and_promotion_id
 
 
 def _get_rule_to_channel_ids_map(rules: QuerySet):
@@ -540,3 +567,60 @@ def _get_rule_to_channel_ids_map(rules: QuerySet):
         channel_id = promotion_rule_channel.channel_id
         rule_to_channel_ids_map[rule_id].append(channel_id)
     return rule_to_channel_ids_map
+
+
+def get_current_products_for_rules(rules: "QuerySet[PromotionRule]"):
+    """Get currently assigned products to promotions.
+
+    Collect all products for variants that are assigned to promotion rules.
+    """
+    PromotionRuleVariant = PromotionRule.variants.through
+    rule_variants = PromotionRuleVariant.objects.filter(
+        Exists(rules.filter(pk=OuterRef("promotionrule_id")))
+    )
+    variants = ProductVariant.objects.filter(
+        Exists(rule_variants.filter(productvariant_id=OuterRef("id")))
+    )
+    return Product.objects.filter(Exists(variants.filter(product_id=OuterRef("id"))))
+
+
+def update_rule_variant_relation(
+    rules: QuerySet[PromotionRule], new_rules_variants: list
+):
+    """Update PromotionRule - ProductVariant relation.
+
+    Deletes relations, which are not valid anymore.
+    Adds new relations, if they don't exist already.
+    `new_rules_variants` is a list of PromotionRuleVariant objects.
+    """
+    with transaction.atomic():
+        PromotionRuleVariant = PromotionRule.variants.through
+        existing_rules_variants = PromotionRuleVariant.objects.filter(
+            Exists(rules.filter(pk=OuterRef("promotionrule_id")))
+        ).all()
+        new_rule_variant_set = set(
+            (rv.promotionrule_id, rv.productvariant_id) for rv in new_rules_variants
+        )
+        existing_rule_variant_set = set(
+            (rv.promotionrule_id, rv.productvariant_id)
+            for rv in existing_rules_variants
+        )
+
+        # Clear invalid variants assigned to promotion rules
+        rule_variant_to_delete_ids = [
+            rv.id
+            for rv in existing_rules_variants
+            if (rv.promotionrule_id, rv.productvariant_id) not in new_rule_variant_set
+        ]
+        PromotionRuleVariant.objects.filter(id__in=rule_variant_to_delete_ids).delete()
+
+        # Assign new variants to promotion rules
+        rules_variants_to_add = [
+            rv
+            for rv in new_rules_variants
+            if (rv.promotionrule_id, rv.productvariant_id)
+            not in existing_rule_variant_set
+        ]
+        PromotionRuleVariant.objects.bulk_create(
+            rules_variants_to_add, ignore_conflicts=True
+        )

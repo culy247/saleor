@@ -63,7 +63,7 @@ if TYPE_CHECKING:
     from ..core.middleware import Requestor
     from ..core.utils.translations import Translation
     from ..csv.models import ExportFile
-    from ..discount.models import Promotion, PromotionRule, Voucher
+    from ..discount.models import Promotion, PromotionRule, Voucher, VoucherCode
     from ..giftcard.models import GiftCard
     from ..invoice.models import Invoice
     from ..menu.models import Menu, MenuItem
@@ -777,10 +777,10 @@ class PluginsManager(PaymentInterface):
             "sale_updated", default_value, sale, previous_catalogue, current_catalogue
         )
 
-    def sale_toggle(self, sale: "Promotion", catalogue):
+    def sale_toggle(self, sale: "Promotion", catalogue, webhooks=None):
         default_value = None
         return self.__run_method_on_plugins(
-            "sale_toggle", default_value, sale, catalogue
+            "sale_toggle", default_value, sale, catalogue, webhooks=webhooks
         )
 
     def promotion_created(self, promotion: "Promotion"):
@@ -801,15 +801,17 @@ class PluginsManager(PaymentInterface):
             "promotion_deleted", default_value, promotion, webhooks=webhooks
         )
 
-    def promotion_started(self, promotion: "Promotion"):
+    def promotion_started(self, promotion: "Promotion", webhooks=None):
         default_value = None
         return self.__run_method_on_plugins(
-            "promotion_started", default_value, promotion
+            "promotion_started", default_value, promotion, webhooks=webhooks
         )
 
-    def promotion_ended(self, promotion: "Promotion"):
+    def promotion_ended(self, promotion: "Promotion", webhooks=None):
         default_value = None
-        return self.__run_method_on_plugins("promotion_ended", default_value, promotion)
+        return self.__run_method_on_plugins(
+            "promotion_ended", default_value, promotion, webhooks=webhooks
+        )
 
     def promotion_rule_created(self, promotion_rule: "PromotionRule"):
         default_value = None
@@ -1523,6 +1525,18 @@ class PluginsManager(PaymentInterface):
             "voucher_deleted", default_value, voucher, code, webhooks=webhooks
         )
 
+    def voucher_codes_created(self, voucher_codes: list["VoucherCode"], webhooks=None):
+        default_value = None
+        return self.__run_method_on_plugins(
+            "voucher_codes_created", default_value, voucher_codes, webhooks=webhooks
+        )
+
+    def voucher_codes_deleted(self, voucher_codes: list["VoucherCode"], webhooks=None):
+        default_value = None
+        return self.__run_method_on_plugins(
+            "voucher_codes_deleted", default_value, voucher_codes, webhooks=webhooks
+        )
+
     def voucher_metadata_updated(self, voucher: "Voucher"):
         default_value = None
         return self.__run_method_on_plugins(
@@ -1859,9 +1873,11 @@ class PluginsManager(PaymentInterface):
     def _get_all_plugin_configs(self):
         with opentracing.global_tracer().start_active_span("_get_all_plugin_configs"):
             if not hasattr(self, "_plugin_configs"):
-                plugin_configurations = PluginConfiguration.objects.prefetch_related(
-                    "channel"
-                ).all()
+                plugin_configurations = (
+                    PluginConfiguration.objects.using(self.database)
+                    .prefetch_related("channel")
+                    .all()
+                )
                 self._plugin_configs_per_channel: defaultdict[
                     Channel, dict
                 ] = defaultdict(dict)
@@ -2119,8 +2135,8 @@ class PluginsManager(PaymentInterface):
 
 
 def get_plugins_manager(
+    allow_replica: bool,
     requestor_getter: Optional[Callable[[], "Requestor"]] = None,
-    allow_replica=True,
 ) -> PluginsManager:
     with opentracing.global_tracer().start_active_span("get_plugins_manager"):
         return PluginsManager(settings.PLUGINS, requestor_getter, allow_replica)

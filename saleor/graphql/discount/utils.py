@@ -8,6 +8,7 @@ from django.db.models import Exists, OuterRef, QuerySet
 from graphene.utils.str_converters import to_camel_case
 
 from ...discount.models import Promotion, PromotionRule
+from ...discount.utils import update_rule_variant_relation
 from ...product.managers import ProductsQueryset, ProductVariantQueryset
 from ...product.models import (
     Category,
@@ -48,23 +49,49 @@ def clean_predicate(predicate: Union[dict[str, Union[dict, list]], list]):
     }
 
 
-def get_products_for_promotion(promotion: Promotion) -> ProductsQueryset:
+def get_products_for_promotion(
+    promotion: Promotion, *, update_rule_variants=False
+) -> ProductsQueryset:
     """Get products that are included in the promotion based on catalogue predicate."""
-    variants = get_variants_for_promotion(promotion)
+    variants = get_variants_for_promotion(
+        promotion, update_rule_variants=update_rule_variants
+    )
     return Product.objects.filter(Exists(variants.filter(product_id=OuterRef("id"))))
 
 
-def get_products_for_rule(rule: PromotionRule) -> ProductsQueryset:
+def get_products_for_rule(
+    rule: PromotionRule, *, update_rule_variants=False
+) -> ProductsQueryset:
     """Get products that are included in the rule based on catalogue predicate."""
     variants = get_variants_for_predicate(deepcopy(rule.catalogue_predicate))
+    if update_rule_variants:
+        rule.variants.set(variants)
     return Product.objects.filter(Exists(variants.filter(product_id=OuterRef("id"))))
 
 
-def get_variants_for_promotion(promotion: Promotion) -> ProductVariantQueryset:
+def get_variants_for_promotion(
+    promotion: Promotion, *, update_rule_variants=False
+) -> ProductVariantQueryset:
     """Get variants that are included in the promotion based on catalogue predicate."""
     queryset = ProductVariant.objects.none()
-    for rule in promotion.rules.iterator():
-        queryset |= get_variants_for_predicate(rule.catalogue_predicate)
+    promotion_rule_variants = []
+    PromotionRuleVariant = PromotionRule.variants.through
+    rules = promotion.rules.all()
+    for rule in rules:
+        variants = get_variants_for_predicate(rule.catalogue_predicate)
+        queryset |= variants
+        if update_rule_variants:
+            promotion_rule_variants.extend(
+                [
+                    PromotionRuleVariant(
+                        promotionrule_id=rule.pk, productvariant_id=variant.pk
+                    )
+                    for variant in variants
+                ]
+            )
+    if promotion_rule_variants:
+        update_rule_variant_relation(rules, promotion_rule_variants)
+
     return queryset
 
 
@@ -293,14 +320,6 @@ def get_categories_from_predicate(catalogue_predicate) -> QuerySet:
     return where_filter_qs(
         Category.objects.all(), {}, CategoryWhere, catalogue_predicate, None
     ).all()
-
-
-def get_product_ids_for_predicate(predicate: dict) -> set[int]:
-    variants = get_variants_for_predicate(predicate)
-    products = Product.objects.filter(
-        Exists(variants.filter(product_id=OuterRef("id")))
-    )
-    return set(products.values_list("id", flat=True))
 
 
 def merge_catalogues_info(

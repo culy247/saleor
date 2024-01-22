@@ -182,7 +182,7 @@ def send_webhook_using_http(
 
 def send_webhook_using_aws_sqs(
     target_url, message, domain, signature, event_type, **kwargs
-):
+) -> WebhookResponse:
     parts = urlparse(target_url)
     region = "us-east-1"
     hostname_parts = parts.hostname.split(".")
@@ -231,7 +231,7 @@ def send_webhook_using_aws_sqs(
         message_kwargs["MessageGroupId"] = domain
     with catch_duration_time() as duration:
         try:
-            response = client.send_message(**message_kwargs)
+            response = json.dumps(client.send_message(**message_kwargs))
         except (ClientError,) as e:
             return WebhookResponse(
                 content=str(e), status=EventDeliveryStatus.FAILED, duration=duration()
@@ -271,7 +271,7 @@ def send_webhook_using_scheme_method(
     custom_headers=None,
 ) -> WebhookResponse:
     parts = urlparse(target_url)
-    message = data.encode("utf-8")
+    message = data if isinstance(data, bytes) else data.encode("utf-8")
     signature = signature_for_payload(message, secret)
     scheme_matrix: dict[WebhookSchemes, Callable] = {
         WebhookSchemes.HTTP: send_webhook_using_http,
